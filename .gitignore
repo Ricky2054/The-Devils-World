@@ -1,1 +1,12 @@
 node_modules
+
+# Environment variables - NEVER commit private keys
+.env
+.env.local
+.env.*.local
+
+# Build output
+build/
+
+# Cache
+cache/

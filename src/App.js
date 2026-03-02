@@ -1,9 +1,7 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { detectEthereumProvider } from '@metamask/detect-provider';
 import { BrowserProvider, formatEther } from 'ethers';
 import { contractService } from './services/contractService.js';
 import './App.css';
-import './utils/walletTest.js';
 import { createSeasonSystem, Season } from './game/SeasonSystem.js';
 import { createEnergySystem } from './game/EnergySystem.js';
 import { createKarmaSystem } from './game/KarmaSystem.js';
@@ -18,6 +16,7 @@ import { InventorySystem, InfrastructureSystem, GAME_ITEMS } from './game/Invent
 import { GameScreenManager } from './game/GameScreens.js';
 import { DayNightCycle } from './game/DayNightCycle.js';
 import { MusicManager } from './game/MusicManager.js';
+import { DialogueManager, TutorialManager, STORY_CHAPTERS, NPC_DIALOGUES } from './game/DialogueSystem.js';
 
 function App() {
   const canvasRef = useRef(null);
@@ -30,6 +29,23 @@ function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [modalContent, setModalContent] = useState('');
+  const [web3Quest, setWeb3Quest] = useState({
+    wallet: false,
+    stake: false,
+    nft: false,
+    rewards: false,
+    cit: false,
+  });
+  // ── Blockchain demo state ──
+  const [txHistory, setTxHistory] = useState([]); // [{hash, type, amount, timestamp, status}]
+  const [citBalance, setCitBalance] = useState('0');
+  const [nftCount, setNftCount] = useState(0);
+  const [citStakerInfo, setCitStakerInfo] = useState(null);
+  const [avaxStakerInfo, setAvaxStakerInfo] = useState(null); // {stakedAmount, tier, currentAPY, multiplierBps_, pendingRewards, isStaking}
+  const [blockchainLoading, setBlockchainLoading] = useState(''); // loading indicator text
+  const pendingRewardRef = useRef({ kills: 0, gold: 0, treasures: 0 }); // accumulate game events between claims
+  const EXCHANGE_RATE = 50; // 50 in-game gold = 1 CIT token
+  const KILL_REWARD_THRESHOLD = 10; // every 10 kills unlocks an NFT mint prompt
   // Real-time points system
   const [realtimeStats, setRealtimeStats] = useState({
     lastUpdate: Date.now(),
@@ -163,6 +179,7 @@ function App() {
   const [leaderboard, setLeaderboard] = useState([]);
   const [walletConnected, setWalletConnected] = useState(false);
   const [walletAddress, setWalletAddress] = useState('');
+  const walletAddressRef = useRef(''); // ref so game-loop closures always read latest wallet
   const [avaxBalance, setAvaxBalance] = useState('0');
   const [gamePoints, setGamePoints] = useState(null);
   const [achievements, setAchievements] = useState([]);
@@ -177,25 +194,39 @@ function App() {
   const dayNightCycle = useRef(new DayNightCycle());
   const musicManager = useRef(new MusicManager());
   
+  // Dialogue & Tutorial systems
+  const dialogueManager = useRef(new DialogueManager());
+  const tutorialManager = useRef(new TutorialManager());
+  const [dialogueData, setDialogueData] = useState(null);   // current dialogue snapshot
+  const [tutorialStep, setTutorialStep] = useState(null);    // current tutorial step
+  const [showPrologue, setShowPrologue] = useState(false);   // true while prologue cutscene plays
+  const hasSeenPrologue = useRef(!!localStorage.getItem('dw_prologue_seen'));
+
   // UI state for inventory and building
   const [showInventory, setShowInventory] = useState(false);
   const [showBuildMenu, setShowBuildMenu] = useState(false);
   const [selectedBuildingType, setSelectedBuildingType] = useState(null);
   const [buildingMode, setBuildingMode] = useState(false);
+  const [showWorldMap, setShowWorldMap] = useState(false);
+  const [showWeb3Panel, setShowWeb3Panel] = useState(false);
   
   // Game state management
   const [gameState, setGameState] = useState('title'); // title, playing, paused, gameOver, scoreboard, help
   const gameStateRef = useRef('title');
   const setScreenState = (next) => { gameStateRef.current = next; setGameState(next); };
   const [gameStartTime, setGameStartTime] = useState(null);
-  const [gameStats, setGameStats] = useState({
-    level: 1,
-    enemiesKilled: 0,
-    goldCollected: 0,
-    buildingsBuilt: 0,
-    achievementsUnlocked: 0,
-    timePlayed: 0,
-    totalScore: 0
+  const GOLD_SAVE_KEY = 'dw_gold_v1';
+  const [gameStats, setGameStats] = useState(() => {
+    const savedGold = parseInt(localStorage.getItem('dw_gold_v1') || '0', 10);
+    return {
+      level: 1,
+      enemiesKilled: 0,
+      goldCollected: isNaN(savedGold) ? 0 : savedGold,
+      buildingsBuilt: 0,
+      achievementsUnlocked: 0,
+      timePlayed: 0,
+      totalScore: 0
+    };
   });
   
   // Day/Night cycle state
@@ -203,15 +234,39 @@ function App() {
   const [isNight, setIsNight] = useState(false);
   const [skyColor, setSkyColor] = useState('#87CEEB');
 
+  // Keep walletAddressRef in sync so the game-loop closure always gets the real address
+  React.useEffect(() => { walletAddressRef.current = walletAddress; }, [walletAddress]);
+
+  // Persist unexchanged gold across sessions
+  React.useEffect(() => {
+    localStorage.setItem('dw_gold_v1', String(gameStats.goldCollected));
+  }, [gameStats.goldCollected]);
+
   // Connect wallet function
   const connectWallet = async () => {
     try {
       const result = await blockchainManager.current.connectWallet();
       setWalletConnected(true);
+      setIsConnected(true);
+      setWeb3Quest(prev => ({ ...prev, wallet: true }));
       setWalletAddress(result.address);
+
+      let initialized = false;
+      try {
+        initialized = await contractService.initialize(blockchainManager.current.ethereumProvider || window.ethereum);
+      } catch (initError) {
+        console.warn('Contract initialization skipped:', initError?.message || initError);
+      }
+
       await updateBalance();
-      
-      setModalContent(`🔗 Wallet Connected!\nAddress: ${result.address.substring(0, 6)}...${result.address.substring(38)}\nNetwork: ${result.network}`);
+      await refreshBlockchainState();
+
+      const shortAddress = `${result.address.substring(0, 6)}...${result.address.slice(-4)}`;
+      if (initialized) {
+        setModalContent(`🔗 Wallet Connected!\nAddress: ${shortAddress}\nNetwork: ${result.network}`);
+      } else {
+        setModalContent(`🔗 Wallet Connected!\nAddress: ${shortAddress}\nNetwork: ${result.network}\n\n⚠️ Smart contracts are disabled until you switch to Avalanche Fuji.`);
+      }
       setShowModal(true);
       setTimeout(() => setShowModal(false), 3000);
     } catch (error) {
@@ -230,9 +285,24 @@ function App() {
   };
 
   // Disconnect wallet
-  const disconnectWallet = () => {
+  const disconnectWallet = async () => {
+    const provider = blockchainManager.current?.ethereumProvider || window.ethereum;
+    if (provider && typeof provider.request === 'function') {
+      try {
+        await provider.request({
+          method: 'wallet_revokePermissions',
+          params: [{ eth_accounts: {} }],
+        });
+      } catch (error) {
+        if (error?.code !== -32601) {
+          console.warn('wallet_revokePermissions failed:', error);
+        }
+      }
+    }
+
     blockchainManager.current.disconnect();
     setWalletConnected(false);
+    setIsConnected(false);
     setWalletAddress('');
     setAvaxBalance('0');
   };
@@ -241,13 +311,22 @@ function App() {
   const handleScreenAction = (action) => {
     switch (action) {
       case 'startGame':
-        setScreenState('playing');
-        setGameStartTime(Date.now());
-        resetGame();
-        // Resume audio context and start gameplay music
-        musicManager.current.resume();
-        screenManager.current.currentScreen = 'playing';
-        musicManager.current.playTrack(isNight ? 'gameplay_night' : 'gameplay_day');
+        // If player hasn't seen the prologue yet, show it first
+        if (!hasSeenPrologue.current) {
+          hasSeenPrologue.current = true;
+          localStorage.setItem('dw_prologue_seen', '1');
+          setShowPrologue(true);
+          dialogueManager.current.startCutscene(STORY_CHAPTERS[0].scenes, () => {
+            setShowPrologue(false);
+            setDialogueData(null);
+            // Now actually start the game
+            _launchGame();
+            // Reset tutorial for new player
+            tutorialManager.current.reset();
+          });
+          return;
+        }
+        _launchGame();
         break;
       case 'restartGame':
         setScreenState('playing');
@@ -273,29 +352,78 @@ function App() {
     }
   };
 
+  // Internal: actually launch gameplay (after prologue or skipped)
+  const _launchGame = () => {
+    setScreenState('playing');
+    setGameStartTime(Date.now());
+    resetGame();
+    musicManager.current.resume();
+    screenManager.current.currentScreen = 'playing';
+    musicManager.current.playTrack(isNight ? 'gameplay_night' : 'gameplay_day');
+  };
+
+  const toggleMusicPlayback = () => {
+    if (musicManager.current.isPlaying) {
+      musicManager.current.stopCurrentTrack();
+      return;
+    }
+    const track = gameStateRef.current === 'title'
+      ? 'title'
+      : gameStateRef.current === 'playing'
+        ? (isNight ? 'gameplay_night' : 'gameplay_day')
+        : 'title';
+    musicManager.current.playTrack(track);
+  };
+
+  const getTitleMenuActionFromClick = (x, y, width, height) => {
+    const panelW = Math.min(460, width * 0.58);
+    const itemH = 36;
+    const panelPad = 14;
+    const panelH = itemH * 5 + panelPad * 2;
+    const panelX = width / 2 - panelW / 2;
+    const panelY = height * 0.62;
+
+    if (x < panelX || x > panelX + panelW || y < panelY || y > panelY + panelH) {
+      return null;
+    }
+
+    const itemIndex = Math.floor((y - panelY - panelPad) / itemH);
+    const actions = ['startGame', 'showScoreboard', 'showHelp', 'connectWallet', 'toggleMusic'];
+    if (itemIndex < 0 || itemIndex >= actions.length) return null;
+    return actions[itemIndex];
+  };
+
   // Reset game for new playthrough
   const resetGame = () => {
-    // Reset player
-    const spawn = motherWorldRef.current?.spawn || { x: 512, y: 600 };
+    // Reset player to a safe walkable spawn point
+    let spawn = motherWorldRef.current?.spawn || { x: 512, y: 600 };
+    if (!isPositionWalkable(spawn.x, spawn.y)) {
+      spawn = findNearestSafePosition(spawn.x, spawn.y);
+    }
     gameWorldState.current.player.x = spawn.x;
     gameWorldState.current.player.y = spawn.y;
     gameWorldState.current.player.health = 100;
     gameWorldState.current.player.state = 'idle';
     
-    // Reset camera
-    gameWorldState.current.camera.x = 200;
-    gameWorldState.current.camera.y = 150;
+    // Reset camera centered on player
+    const canvas = canvasRef.current;
+    const zoomScale = gameWorldState.current.zoomScale || 2.0;
+    gameWorldState.current.camera.x = Math.max(0, spawn.x - (canvas ? canvas.width : 800) / (2 * zoomScale));
+    gameWorldState.current.camera.y = Math.max(0, spawn.y - (canvas ? canvas.height : 600) / (2 * zoomScale));
     
-    // Reset game stats
-    setGameStats({
+    // Clear saved position so new game starts fresh
+    localStorage.removeItem(PLAYER_PROGRESS_KEY);
+    
+    // Reset session-based stats but keep gold (so unexchanged gold carries over to next session)
+    setGameStats(prev => ({
       level: 1,
       enemiesKilled: 0,
-      goldCollected: 0,
+      goldCollected: prev.goldCollected, // ← carries over until exchanged for CIT
       buildingsBuilt: 0,
       achievementsUnlocked: 0,
       timePlayed: 0,
       totalScore: 0
-    });
+    }));
     
     // Reset point system
     if (pointSystem.current) {
@@ -341,7 +469,7 @@ function App() {
     
     setGameStats(finalStats);
     setGameState('gameOver');
-    screenManager.current.gameOver(finalStats);
+    screenManager.current.gameOver(finalStats, walletAddressRef.current || 'Anonymous');
     
     // Play game over music
     musicManager.current.playTrack('gameOver', false);
@@ -349,15 +477,36 @@ function App() {
 
   // Handle canvas click for building placement
   const handleCanvasClick = (e) => {
-    // If on title screen, treat any click as Start (canvas or overlay)
-    if (gameState === 'title') {
-      handleScreenAction('startGame');
+    // Advance dialogue on click
+    if (dialogueManager.current.isActive()) {
+      const still = dialogueManager.current.advance();
+      setDialogueData(still ? dialogueManager.current.getCurrent() : null);
+      return;
+    }
+
+    const canvas = canvasRef.current;
+
+    // Title screen menu click handling
+    if (gameStateRef.current === 'title') {
+      if (!canvas || e.target !== canvas) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const canvasX = ((e.clientX - rect.left) / rect.width) * canvas.width;
+      const canvasY = ((e.clientY - rect.top) / rect.height) * canvas.height;
+      const action = getTitleMenuActionFromClick(canvasX, canvasY, canvas.width, canvas.height);
+
+      if (action === 'toggleMusic') {
+        toggleMusicPlayback();
+      } else {
+        handleScreenAction(action || 'startGame');
+      }
+
       e.stopPropagation();
       return;
     }
+
     if (!buildingMode || !selectedBuildingType || !infrastructureSystem.current) return;
-    
-    const canvas = canvasRef.current;
+
     if (!canvas) return;
     
     const rect = canvas.getBoundingClientRect();
@@ -399,7 +548,7 @@ function App() {
 
   // Game world state
   const gameWorldState = useRef({
-    zoomScale: 1.5, // 1.5x zoom - reasonable size
+    zoomScale: 2.0, // 2x zoom for crisp visuals
     gameTitle: 'Devil\'s World Adventure', // Changed from crypto island
     showWeatherEffects: false,
     player: {
@@ -433,12 +582,65 @@ function App() {
     level: 1,
     treasures: [],
     enemies: [],
+    enemySpawnTimer: 0,
+    enemySpawnInterval: 900,
+    maxEnemies: 44,
     combatMode: false,
     questsCompleted: 0,
     areasVisited: new Set(),
     particles: [],
     soundEnabled: true
   });
+  const PLAYER_PROGRESS_KEY = 'devil_world_player_progress_v1';
+  const lastPlayerSaveRef = useRef(0);
+
+  const savePlayerProgress = (force = false) => {
+    try {
+      const now = Date.now();
+      if (!force && now - lastPlayerSaveRef.current < 1000) return;
+      lastPlayerSaveRef.current = now;
+      const player = gameWorldState.current.player;
+      const camera = gameWorldState.current.camera;
+      const payload = {
+        x: Math.round(player.x),
+        y: Math.round(player.y),
+        cameraX: Math.round(camera.x),
+        cameraY: Math.round(camera.y),
+        health: player.health,
+        ts: now,
+        stats: null,
+        points: null
+      };
+      // Safely capture game stats (use closure-safe approach)
+      try {
+        const statsEl = document.querySelector('.hud-stats-grid');
+        if (statsEl) {
+          const text = statsEl.textContent || '';
+          const xpMatch = text.match(/XP\s*(\d+)/);
+          const goldMatch = text.match(/Gold\s*(\d+)/);
+          payload.points = {
+            experience: xpMatch ? parseInt(xpMatch[1]) : 0,
+            gold: goldMatch ? parseInt(goldMatch[1]) : 0
+          };
+        }
+      } catch(_) {}
+      localStorage.setItem(PLAYER_PROGRESS_KEY, JSON.stringify(payload));
+    } catch (_) {
+      // Ignore persistence errors silently
+    }
+  };
+
+  const loadPlayerProgress = () => {
+    try {
+      const raw = localStorage.getItem(PLAYER_PROGRESS_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed.x !== 'number' || typeof parsed.y !== 'number') return null;
+      return parsed;
+    } catch (_) {
+      return null;
+    }
+  };
 
   // Audio context
   const audioContext = useRef(null);
@@ -979,6 +1181,7 @@ function App() {
 
   // Load Mother World from external JSON (public/mother_world_map.json)
   const motherWorldRef = useRef(null);
+  const minimapCacheRef = useRef({ canvas: null, frameCount: 0 });
 
   // Seeded PRNG for deterministic generation
   const makeRng = (seed = 1337) => {
@@ -1143,7 +1346,7 @@ function App() {
     // Entities
     const npcs = villages.map((v, i) => ({ x: v.x * 8, y: v.y * 8, type: 'villager', village: `Village ${i + 1}` }));
     const treasures = Array.from({ length: 20 }, (_, i) => ({ x: Math.floor(rng() * width) * 8, y: Math.floor(rng() * height) * 8, type: 'gold', value: 1 + Math.floor(rng() * 50), collected: false }));
-    const enemies = Array.from({ length: 30 }, () => ({ x: Math.floor(rng() * width) * 8, y: Math.floor(rng() * height) * 8, width: 16, height: 16, type: rng() < 0.5 ? 'boar' : (rng() < 0.5 ? 'bee' : 'snail'), difficulty: rng() < 0.2 ? 'hard' : rng() < 0.6 ? 'medium' : 'easy', facingRight: rng() < 0.5, health: 100, maxHealth: 100 }));
+    const enemies = Array.from({ length: 30 }, () => ({ x: Math.floor(rng() * width) * 8, y: Math.floor(rng() * height) * 8, width: 16, height: 16, type: rng() < 0.55 ? 'bee' : 'snail', difficulty: rng() < 0.2 ? 'hard' : rng() < 0.6 ? 'medium' : 'easy', facingRight: rng() < 0.5, health: 100, maxHealth: 100 }));
 
     // Spawn near middle village or center
     const spawnVillage = villages[0] || { x: Math.floor(width / 2), y: Math.floor(height / 2) };
@@ -1161,11 +1364,13 @@ function App() {
     const seed = spec.seed || 1337;
     const rng = makeRng(seed);
     const tiles = Array(height).fill(null).map(() => Array(width).fill(T.deepWater));
+    const props = [];
 
     // Island mask
     const cx = width / 2, cy = height / 2;
     const radiusX = (spec.island?.radiusX || 0.48) * width;
     const radiusY = (spec.island?.radiusY || 0.48) * height;
+    const islandThreshold = spec.island?.threshold || 1.05;
     const fbm = (x, y) => {
       let a = 1, f = 1, s = 0, n = 0;
       for (let o = 0; o < 4; o++) { s += noise2D(x * f, y * f, rng) * a; n += a; a *= 0.5; f *= 1.9; }
@@ -1177,7 +1382,7 @@ function App() {
         const dy = (y - cy) / radiusY;
         const r = Math.sqrt(dx * dx + dy * dy);
         const n = fbm(x / 64, y / 64);
-        if (r + (0.25 - n * 0.35) < 0.98) tiles[y][x] = T.grass;
+        if (r + (0.22 - n * 0.30) < islandThreshold) tiles[y][x] = T.grass;
       }
     }
 
@@ -1194,6 +1399,16 @@ function App() {
     }
     for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
       if (tiles[y][x] === T.grass && near(x, y, t => t === T.shallowWater || t === T.deepWater)) tiles[y][x] = T.sand;
+    }
+
+    // Optional mode for land-focused RPG maps (reduces large blue/ocean regions)
+    if (spec.removeOcean) {
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          if (tiles[y][x] === T.deepWater) tiles[y][x] = T.grass;
+          else if (tiles[y][x] === T.shallowWater) tiles[y][x] = T.sand;
+        }
+      }
     }
 
     // Climate bands
@@ -1237,7 +1452,7 @@ function App() {
       }
     });
 
-    // Villages
+    // Villages / settlements
     const villages = [];
     const vSpec = spec.villages || { count: 5, minDistWater: 3 };
     const farFromWater = (x, y) => {
@@ -1246,10 +1461,27 @@ function App() {
         const t = tiles[ny][nx]; if (t === T.deepWater || t === T.shallowWater || t === T.river || t === T.sand) return false;
       } return true;
     };
-    let tries = 0; while (villages.length < vSpec.count && tries++ < 5000) {
+    const settlementSeeds = Array.isArray(spec.settlements) && spec.settlements.length
+      ? spec.settlements.map(s => ({ x: Math.floor(width * s.x), y: Math.floor(height * s.y), name: s.name }))
+      : [];
+
+    settlementSeeds.forEach(s => {
+      if (!inB(s.x, s.y) || !farFromWater(s.x, s.y)) return;
+      villages.push({ x: s.x, y: s.y, name: s.name });
+      for (let j = -4; j <= 4; j++) for (let i = -4; i <= 4; i++) {
+        const nx = s.x + i, ny = s.y + j;
+        if (!inB(nx, ny)) continue;
+        if (Math.abs(i) <= 2 && Math.abs(j) <= 2) tiles[ny][nx] = T.village;
+        else if (tiles[ny][nx] === T.forest || tiles[ny][nx] === T.rock) tiles[ny][nx] = T.grass;
+      }
+    });
+
+    let tries = 0;
+    while (villages.length < vSpec.count && tries++ < 5000) {
       const x = Math.floor(rng() * width), y = Math.floor(rng() * height);
       if (!(tiles[y][x] === T.grass || tiles[y][x] === T.forest)) continue;
       if (!farFromWater(x, y)) continue;
+      if (villages.some(v => Math.hypot(v.x - x, v.y - y) < 18)) continue;
       villages.push({ x, y });
       for (let j = -3; j <= 3; j++) for (let i = -3; i <= 3; i++) {
         const nx = x + i, ny = y + j; if (!inB(nx, ny)) continue;
@@ -1269,7 +1501,20 @@ function App() {
     for (let i = 1; i < villages.length; i++) link(villages[i - 1].x, villages[i - 1].y, villages[i].x, villages[i].y);
 
     // Entities from spec or defaults
-    const npcs = villages.map((v, i) => ({ x: v.x * 8, y: v.y * 8, type: 'villager', village: spec.villageNames?.[i] || `Village ${i + 1}` }));
+    const defaultNpcDialogues = [
+      'The old road hides more than it reveals.',
+      'Treasure glows brighter near forgotten ruins.',
+      'Night creatures avoid torch-lit paths.'
+    ];
+    const npcs = villages.map((v, i) => ({
+      x: v.x * 8,
+      y: v.y * 8,
+      type: 'villager',
+      village: v.name || spec.villageNames?.[i] || `Village ${i + 1}`,
+      name: v.name || spec.villageNames?.[i] || `Villager ${i + 1}`,
+      politicalAffiliation: 'Neutral',
+      dialogueTree: defaultNpcDialogues
+    }));
     // Place buildings around each village center
     villages.forEach((v, i) => {
       const name = spec.villageNames?.[i] || `Village ${i + 1}`;
@@ -1286,17 +1531,76 @@ function App() {
         const tx = v.x + ox, ty = v.y + oy; if (!inB(tx, ty)) continue; if (tiles[ty][tx] !== T.deepWater) tiles[ty][tx] = (Math.abs(ox) + Math.abs(oy)) <= 2 ? T.dirt : tiles[ty][tx];
       }
     });
-    const treasures = (spec.treasures || []).map(t => ({ ...t }));
-    while (treasures.length < (spec.autoTreasures || 30)) {
-      treasures.push({ x: Math.floor(rng() * width) * 8, y: Math.floor(rng() * height) * 8, type: 'gold', value: 1 + Math.floor(rng() * 50), collected: false });
+    const isWalkableTile = (tile) => tile !== T.deepWater && tile !== T.shallowWater && tile !== T.river && tile !== T.mountain;
+    const isWalkableAtPixel = (px, py) => {
+      const tx = Math.floor(px / 8);
+      const ty = Math.floor(py / 8);
+      if (!inB(tx, ty)) return false;
+      return isWalkableTile(tiles[ty][tx]);
+    };
+    const hasMinDistance = (px, py, points, minDistance) => points.every(p => Math.hypot(p.x - px, p.y - py) >= minDistance);
+
+    const spawnVillage = villages[0] || { x: Math.floor(width / 2), y: Math.floor(height / 2) };
+    const desiredSpawn = spec.spawn || { x: spawnVillage.x * 8, y: (spawnVillage.y + 3) * 8 };
+
+    const findNearestWalkablePixel = (px, py, maxRadius = 60) => {
+      const tx = Math.floor(px / 8);
+      const ty = Math.floor(py / 8);
+      if (inB(tx, ty) && isWalkableTile(tiles[ty][tx])) return { x: tx * 8, y: ty * 8 };
+      for (let r = 1; r <= maxRadius; r++) {
+        for (let oy = -r; oy <= r; oy++) {
+          for (let ox = -r; ox <= r; ox++) {
+            if (Math.abs(ox) !== r && Math.abs(oy) !== r) continue;
+            const nx = tx + ox;
+            const ny = ty + oy;
+            if (!inB(nx, ny)) continue;
+            if (isWalkableTile(tiles[ny][nx])) return { x: nx * 8, y: ny * 8 };
+          }
+        }
+      }
+      return { x: spawnVillage.x * 8, y: spawnVillage.y * 8 };
+    };
+    const spawn = findNearestWalkablePixel(desiredSpawn.x, desiredSpawn.y);
+
+    const treasures = (spec.treasures || []).map(t => ({ ...t, collected: !!t.collected }));
+    const treasureMinDistance = spec.treasureMinDistance || 96;
+    const treasureTarget = spec.autoTreasures || 24;
+    let treasureTries = 0;
+    while (treasures.length < treasureTarget && treasureTries++ < 20000) {
+      const px = Math.floor(rng() * width) * 8;
+      const py = Math.floor(rng() * height) * 8;
+      if (!isWalkableAtPixel(px, py)) continue;
+      if (Math.hypot(px - spawn.x, py - spawn.y) < 180) continue;
+      if (!hasMinDistance(px, py, treasures, treasureMinDistance)) continue;
+      treasures.push({ x: px, y: py, type: rng() < 0.15 ? 'diamond' : 'gold', value: 10 + Math.floor(rng() * 60), collected: false });
     }
-    const enemies = (spec.enemies || []).map(e => ({ ...e }));
-    while (enemies.length < (spec.autoEnemies || 40)) {
-      enemies.push({ x: Math.floor(rng() * width) * 8, y: Math.floor(rng() * height) * 8, width: 16, height: 16, type: rng() < 0.5 ? 'boar' : (rng() < 0.5 ? 'bee' : 'snail'), difficulty: rng() < 0.2 ? 'hard' : rng() < 0.6 ? 'medium' : 'easy', facingRight: rng() < 0.5, health: 100, maxHealth: 100 });
+
+    const enemies = (spec.enemies || []).map(e => ({ ...e, health: e.health || 100, maxHealth: e.maxHealth || 100 }));
+    const enemyMinDistance = spec.enemyMinDistance || 88;
+    const enemyTarget = spec.autoEnemies || 30;
+    let enemyTries = 0;
+    while (enemies.length < enemyTarget && enemyTries++ < 25000) {
+      const px = Math.floor(rng() * width) * 8;
+      const py = Math.floor(rng() * height) * 8;
+      if (!isWalkableAtPixel(px, py)) continue;
+      if (Math.hypot(px - spawn.x, py - spawn.y) < 220) continue;
+      if (!hasMinDistance(px, py, enemies, enemyMinDistance)) continue;
+      const yNorm = py / (height * 8);
+      const type = yNorm < 0.35 ? (rng() < 0.65 ? 'snail' : 'bee') : (yNorm < 0.7 ? (rng() < 0.55 ? 'bee' : 'snail') : (rng() < 0.5 ? 'bee' : 'snail'));
+      enemies.push({
+        x: px,
+        y: py,
+        width: 16,
+        height: 16,
+        type,
+        difficulty: yNorm < 0.35 ? 'easy' : (yNorm < 0.7 ? 'medium' : 'hard'),
+        facingRight: rng() < 0.5,
+        health: 100,
+        maxHealth: 100
+      });
     }
 
     // Spawn
-    const spawn = spec.spawn || { x: Math.floor(width / 2) * 8, y: Math.floor(height / 2) * 8 };
     return { name: spec.name || 'Mother World', width, height, tiles, npcs, enemies, treasures, spawn, props };
   }
   const gameMap = {
@@ -1307,27 +1611,117 @@ function App() {
   };
   // player spawn will be applied once during initGame
 
-  // Initialize treasures from Mother World
+  // Initialize treasures — generate gold across walkable terrain
   const initTreasures = () => {
     const world = motherWorldRef.current;
-    gameWorldState.current.treasures = [...(world?.treasures || [])];
-    console.log(`🏆 Loaded ${gameWorldState.current.treasures.length} treasures from Mother World`);
+    let list = [...(world?.treasures || [])];
+
+    // Generate treasure items if the map has none
+    if (list.length < 20 && world?.tiles?.length) {
+      const tileH = world.tiles.length;
+      const tileW = world.tiles[0]?.length || 0;
+      const spawn = world.spawn || { x: Math.floor(tileW * 4), y: Math.floor(tileH * 4) };
+      let tries = 0;
+      while (list.length < 45 && tries++ < 8000) {
+        const px = Math.floor(Math.random() * Math.max(1, tileW)) * 8;
+        const py = Math.floor(Math.random() * Math.max(1, tileH)) * 8;
+        if (!isPositionWalkable(px, py)) continue;
+        if (Math.hypot(px - spawn.x, py - spawn.y) < 120) continue;
+        let tooClose = false;
+        for (let i = 0; i < list.length; i++) {
+          if (Math.hypot(px - list[i].x, py - list[i].y) < 80) { tooClose = true; break; }
+        }
+        if (tooClose) continue;
+        const val = Math.random() < 0.15 ? 10 : Math.random() < 0.3 ? 5 : 2;
+        const tType = val >= 10 ? 'rare_chest' : val >= 5 ? 'chest' : 'gold';
+        list.push({ x: px, y: py, type: tType, name: tType === 'rare_chest' ? 'Rare Chest' : tType === 'chest' ? 'Treasure Chest' : 'Gold', value: val, collected: false });
+      }
+    }
+
+    // Store on motherWorldRef so currentArea.treasures picks them up
+    if (world) world.treasures = list;
+    gameWorldState.current.treasures = list;
+    console.log(`🏆 Generated ${list.length} treasures for the world`);
   };
 
   // Initialize enemies from Mother World
+  const normalizeEnemy = (enemy) => {
+    const difficulty = enemy?.difficulty || 'easy';
+    const baseSpeed = difficulty === 'hard' ? 1.4 : difficulty === 'medium' ? 1.15 : 0.95;
+    const direction = enemy?.direction === -1 || enemy?.direction === 1
+      ? enemy.direction
+      : (Math.random() < 0.5 ? -1 : 1);
+    const type = enemy?.type === 'boar' ? 'bee' : (enemy?.type || 'bee');
+
+    // Render sizes tuned for proportion to knight (64×64 draw with ~50% fill)
+    // Bee: small flying insect, Snail: ground crawler
+    const profile = type === 'bee'
+      ? { width: 10, height: 8,  renderWidth: 24, renderHeight: 24, yOffset: 10 }
+      : { width: 12, height: 10, renderWidth: 18, renderHeight: 18, yOffset: 6 };
+
+    return {
+      x: enemy?.x ?? 0,
+      y: enemy?.y ?? 0,
+      width: profile.width,
+      height: profile.height,
+      renderWidth: profile.renderWidth,
+      renderHeight: profile.renderHeight,
+      yOffset: profile.yOffset,
+      type,
+      difficulty,
+      speed: typeof enemy?.speed === 'number' ? enemy.speed : baseSpeed,
+      direction,
+      facingRight: typeof enemy?.facingRight === 'boolean' ? enemy.facingRight : direction > 0,
+      state: enemy?.state || 'patrol',
+      health: typeof enemy?.health === 'number' ? enemy.health : 100,
+      maxHealth: typeof enemy?.maxHealth === 'number' ? enemy.maxHealth : 100,
+      attackCooldown: typeof enemy?.attackCooldown === 'number' ? enemy.attackCooldown : 0,
+    };
+  };
+
   const initEnemies = () => {
     // Base enemies from Mother World
     const world = motherWorldRef.current;
-    let list = [...(world?.enemies || [])];
+    let list = [...(world?.enemies || [])].map(normalizeEnemy);
+
+    // Ensure a healthy baseline even if source map has few/no enemy definitions
+    if (list.length < 18 && world?.tiles?.length) {
+      const tileH = world.tiles.length;
+      const tileW = world.tiles[0]?.length || 0;
+      const spawn = world.spawn || { x: Math.floor(tileW * 4), y: Math.floor(tileH * 4) };
+      let tries = 0;
+      while (list.length < 18 && tries++ < 7000) {
+        const px = Math.floor(Math.random() * Math.max(1, tileW)) * 8;
+        const py = Math.floor(Math.random() * Math.max(1, tileH)) * 8;
+        if (!isPositionWalkable(px, py)) continue;
+        if (Math.hypot(px - spawn.x, py - spawn.y) < 200) continue;
+        let closeToOther = false;
+        for (let i = 0; i < list.length; i++) {
+          if (Math.hypot(px - list[i].x, py - list[i].y) < 72) {
+            closeToOther = true;
+            break;
+          }
+        }
+        if (closeToOther) continue;
+        const yNorm = tileH > 0 ? py / (tileH * 8) : 0.5;
+        const type = yNorm < 0.35
+          ? (Math.random() < 0.7 ? 'snail' : 'bee')
+          : (yNorm < 0.7 ? (Math.random() < 0.55 ? 'bee' : 'snail') : (Math.random() < 0.5 ? 'bee' : 'snail'));
+        const difficulty = yNorm < 0.35 ? 'easy' : (yNorm < 0.7 ? 'medium' : 'hard');
+        list.push(normalizeEnemy({ x: px, y: py, width: 16, height: 16, type, difficulty }));
+      }
+    }
+
     // Night boost: if starting at night, add extra spawns
     if (dayNightCycle.current && dayNightCycle.current.isNight) {
       const extra = Math.floor(list.length * 0.3);
       for (let i = 0; i < extra; i++) {
         const e = list[(i * 7) % Math.max(1,list.length)];
-        list.push({ ...e, x: e.x + (Math.random() * 80 - 40), y: e.y + (Math.random() * 80 - 40) });
+        list.push(normalizeEnemy({ ...e, x: e.x + (Math.random() * 80 - 40), y: e.y + (Math.random() * 80 - 40) }));
       }
     }
     gameWorldState.current.enemies = list;
+    gameWorldState.current.enemySpawnTimer = 0;
     console.log(`👹 Loaded ${list.length} enemies (night boost applied if night)`);
   };
 
@@ -1348,58 +1742,67 @@ function App() {
 
   // Viewport sizing: centered rectangle window (16:10 aspect)
   const computeViewportSize = () => {
-    const availableW = window.innerWidth - 120;
-    const availableH = window.innerHeight - 180;
-    const w = clamp(Math.floor(availableW * 0.8), 960, 1280);
-    const h = clamp(Math.floor(w * 0.625), 600, 800); // 16:10 ratio
+    const horizontalPadding = 24;
+    const verticalPadding = 24;
+    const availableW = window.innerWidth - horizontalPadding;
+    const availableH = window.innerHeight - verticalPadding;
+    const w = clamp(Math.floor(availableW), 960, 1920);
+    const h = clamp(Math.floor(availableH), 600, 1080);
     return { width: w - (w % 8), height: h - (h % 8) };
   };
 
-  // Enhanced tile collision detection for SNES-style tiles
+  // Tile collision detection — blocks impassable terrain
   const checkTileCollision = (x, y, width, height) => {
-    const tileSize = 8; // SNES-style 8x8 tiles
+    const tileSize = 8;
     const left = Math.floor(x / tileSize);
     const right = Math.floor((x + width) / tileSize);
     const top = Math.floor(y / tileSize);
     const bottom = Math.floor((y + height) / tileSize);
-    const currentArea = gameMap.areas[gameMap.currentArea];
 
     const mw = motherWorldRef.current;
+    if (!mw || !mw.tiles) return false; // No world loaded yet — don't block
     for (let row = top; row <= bottom; row++) {
       for (let col = left; col <= right; col++) {
-        if (row >= 0 && row < gameMap.height && col >= 0 && col < gameMap.width) {
-          const tileType = mw?.tiles?.[row]?.[col] ?? 0;
-          
-          // SNES-style collision detection
-          // Buildings, trees, rocks, and structures block movement
-          if (tileType === 5 || // Stone/Rock
-              tileType === 9 || // Dark Building
-              tileType === 10 || // Medium Building
-              tileType === 11 || // Light Building
-              tileType === 12 || // Bright Building
-              tileType === 13 || // Red Brick
-              tileType === 14 || // Bright Brick
-              tileType === 15 || // Tree Trunk
-              tileType === 18 || // Wood/Logs
-              tileType === 22 || // Magic/Purple (blockchain nodes)
-              tileType === 23) { // Pink/Neon (crypto signs)
-            return true;
-          }
-        }
-      }
-    }
-    // Prop collisions (houses, rocks, stumps, trees if marked block)
-    if (currentArea.props) {
-      for (const p of currentArea.props) {
-        if (!p.block) continue;
-        const pw = p.type === 'house' ? 24 : 16;
-        const ph = p.type === 'house' ? 20 : 16;
-        if (x < p.x + pw && x + width > p.x && y < p.y + ph && y + height > p.y) {
+        if (row < 0 || row >= gameMap.height || col < 0 || col >= gameMap.width) continue;
+        const tileType = mw.tiles[row]?.[col] ?? 3; // default to walkable grass
+        // Only block truly impassable tiles
+        if (tileType === 6 ||  // Deep Water
+            tileType === 25) { // Mountain core
           return true;
         }
       }
     }
     return false;
+  };
+
+  // Check if a pixel position is walkable (for spawn validation)
+  const isPositionWalkable = (px, py) => {
+    const mw = motherWorldRef.current;
+    if (!mw || !mw.tiles) return true;
+    const tx = Math.floor(px / 8);
+    const ty = Math.floor(py / 8);
+    if (ty < 0 || ty >= mw.tiles.length || tx < 0 || tx >= (mw.tiles[0]?.length || 0)) return false;
+    const t = mw.tiles[ty][tx];
+    return t !== 6 && t !== 25; // not deep water, not mountain
+  };
+
+  // Find nearest walkable position (for unsticking)
+  const findNearestSafePosition = (px, py) => {
+    if (isPositionWalkable(px, py)) return { x: px, y: py };
+    const mw = motherWorldRef.current;
+    if (!mw || !mw.tiles) return { x: px, y: py };
+    for (let r = 1; r <= 80; r++) {
+      for (let oy = -r; oy <= r; oy++) {
+        for (let ox = -r; ox <= r; ox++) {
+          if (Math.abs(ox) !== r && Math.abs(oy) !== r) continue;
+          const nx = px + ox * 8, ny = py + oy * 8;
+          if (isPositionWalkable(nx, ny)) return { x: nx, y: ny };
+        }
+      }
+    }
+    // Ultimate fallback — spawn point
+    const spawn = mw.spawn || { x: 512, y: 600 };
+    return spawn;
   };
 
   // Enhanced area transitions for larger world
@@ -1460,7 +1863,7 @@ function App() {
     const moveSpeed = 3;
 
     // Check for game over condition
-    if (player.health <= 0 && gameState === 'playing') {
+    if (player.health <= 0 && gameStateRef.current === 'playing') {
       triggerGameOver();
       return;
     }
@@ -1525,13 +1928,20 @@ function App() {
       player.y = newY;
     }
 
+    // Unstick safety: if player is currently inside a blocked tile, teleport to nearest safe position
+    if (checkTileCollision(player.x, player.y, player.width, player.height)) {
+      const safe = findNearestSafePosition(player.x, player.y);
+      player.x = safe.x;
+      player.y = safe.y;
+    }
+
     // Keep player in bounds
     player.x = Math.max(0, Math.min(player.x, gameMap.width * 8 - player.width));
     player.y = Math.max(0, Math.min(player.y, gameMap.height * 8 - player.height));
 
     // Enhanced camera following with smooth interpolation
     const canvas = canvasRef.current;
-    const zoomScale = gameWorldState.current.zoomScale || 1.5;
+    const zoomScale = gameWorldState.current.zoomScale || 2.0;
     const targetCameraX = player.x - (canvas ? canvas.width : 800) / (2 * zoomScale);
     const targetCameraY = player.y - (canvas ? canvas.height : 600) / (2 * zoomScale);
     
@@ -1543,6 +1953,9 @@ function App() {
     const maxY = gameMap.height * 8 - (canvas ? canvas.height : 600) / zoomScale;
     gameWorldState.current.camera.x = Math.max(0, Math.min(maxX, gameWorldState.current.camera.x));
     gameWorldState.current.camera.y = Math.max(0, Math.min(maxY, gameWorldState.current.camera.y));
+
+    // Persist progress continuously so position is retained after closing UI/window
+    savePlayerProgress(false);
 
     // Update player timers
     if (player.attackCooldown > 0) player.attackCooldown--;
@@ -1602,6 +2015,47 @@ function App() {
   const updateEnemies = () => {
     const player = gameWorldState.current.player;
     const enemies = gameWorldState.current.enemies;
+
+    // Dynamic enemy spawning for a lively world
+    if (gameStateRef.current === 'playing' && motherWorldRef.current?.tiles?.length) {
+      const world = motherWorldRef.current;
+      const worldWidthPx = (world.tiles[0]?.length || 0) * 8;
+      const worldHeightPx = world.tiles.length * 8;
+      const targetCount = (dayNightCycle.current?.isNight ? 42 : 30);
+      const maxEnemies = gameWorldState.current.maxEnemies || 44;
+      gameWorldState.current.enemySpawnTimer = (gameWorldState.current.enemySpawnTimer || 0) + 1;
+
+      if (enemies.length < Math.min(maxEnemies, targetCount) &&
+          gameWorldState.current.enemySpawnTimer >= (gameWorldState.current.enemySpawnInterval || 900)) {
+        let spawned = false;
+        for (let attempt = 0; attempt < 120 && !spawned; attempt++) {
+          const px = Math.floor(Math.random() * Math.max(1, worldWidthPx / 8)) * 8;
+          const py = Math.floor(Math.random() * Math.max(1, worldHeightPx / 8)) * 8;
+          const distToPlayer = Math.hypot(px - player.x, py - player.y);
+          if (distToPlayer < 220 || distToPlayer > 820) continue;
+          if (!isPositionWalkable(px, py)) continue;
+
+          let tooClose = false;
+          for (let i = 0; i < enemies.length; i++) {
+            if (Math.hypot(px - enemies[i].x, py - enemies[i].y) < 76) {
+              tooClose = true;
+              break;
+            }
+          }
+          if (tooClose) continue;
+
+          const yNorm = worldHeightPx > 0 ? (py / worldHeightPx) : 0.5;
+          const type = yNorm < 0.35
+            ? (Math.random() < 0.7 ? 'snail' : 'bee')
+            : (yNorm < 0.7 ? (Math.random() < 0.55 ? 'bee' : 'snail') : (Math.random() < 0.5 ? 'bee' : 'snail'));
+          const difficulty = yNorm < 0.35 ? 'easy' : (yNorm < 0.7 ? 'medium' : 'hard');
+
+          enemies.push(normalizeEnemy({ x: px, y: py, width: 16, height: 16, type, difficulty, health: 100, maxHealth: 100 }));
+          spawned = true;
+        }
+        gameWorldState.current.enemySpawnTimer = 0;
+      }
+    }
     
     // Check if any enemies are in combat range for music
     const enemiesInCombat = enemies.some(enemy => {
@@ -1629,12 +2083,12 @@ function App() {
       const distance = Math.sqrt(dx * dx + dy * dy);
       
       // AI behavior based on difficulty and distance
-      if (distance < 200) { // Detection range
+      if (distance < 320) { // Detection range
         gameWorldState.current.combatMode = true;
         
         // Move towards player
         const moveSpeed = enemy.speed * (enemy.difficulty === 'hard' ? 1.5 : enemy.difficulty === 'medium' ? 1.2 : 1);
-        if (distance > 40) { // Chase
+        if (distance > 36) { // Chase
           const moveX = (dx / distance) * moveSpeed;
           const moveY = (dy / distance) * moveSpeed;
           
@@ -1688,8 +2142,18 @@ function App() {
       }
     });
     
-    // Remove dead enemies
+    // Remove dead enemies and track kills
+    const beforeCount = gameWorldState.current.enemies.length;
     gameWorldState.current.enemies = gameWorldState.current.enemies.filter(e => e.health > 0);
+    const killed = beforeCount - gameWorldState.current.enemies.length;
+    if (killed > 0) {
+      pendingRewardRef.current.kills += killed;
+      setGameStats(prev => {
+        const newKills = prev.enemiesKilled + killed;
+        checkGameMilestones(newKills, prev.goldCollected, 0);
+        return { ...prev, enemiesKilled: newKills };
+      });
+    }
   };
 
   // Update treasures
@@ -1701,6 +2165,15 @@ function App() {
       if (!treasure.collected && checkCollision(player, { x: treasure.x, y: treasure.y, width: 20, height: 20 })) {
         treasure.collected = true;
         playSound('collect', 600, 0.2);
+        
+        // Track gold for blockchain exchange
+        pendingRewardRef.current.gold += treasure.value;
+        pendingRewardRef.current.treasures += 1;
+        setGameStats(prev => {
+          const newGold = prev.goldCollected + treasure.value;
+          checkGameMilestones(prev.enemiesKilled, newGold, 0);
+          return { ...prev, goldCollected: newGold };
+        });
         
         // Update player stats - only AVAX
         setPlayerStats(prev => ({
@@ -1846,11 +2319,20 @@ function App() {
       }
     
       // Dynamic sky color based on time of day
-      let baseSkyColor = '#87CEEB'; // Default sky blue for Mother World
+      let baseSkyColor = '#101a24'; // Dark ambient backdrop to avoid bright blue void
     
     // Override with day/night cycle color if more dramatic
     ctx.fillStyle = skyColor !== '#87CEEB' ? skyColor : baseSkyColor;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Subtle cinematic daylight tint (keeps scene grounded, less flat)
+    if (!isNight) {
+      const daylight = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      daylight.addColorStop(0, 'rgba(255, 244, 214, 0.10)');
+      daylight.addColorStop(1, 'rgba(94, 151, 110, 0.08)');
+      ctx.fillStyle = daylight;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
     
     // Subtle global darkening at night (no sun/moon icons)
     if (isNight) {
@@ -1869,12 +2351,14 @@ function App() {
     if (typeof ctx.imageSmoothingEnabled === 'boolean') ctx.imageSmoothingEnabled = false;
     
     // Draw SNES-style tiles with proper layering and effects for Mother World
-    const tileSize = 8; // SNES-style 8x8 tiles
-    // Reduce overdraw margins for performance (-2/+2 instead of -5/+5)
-    const startRow = Math.max(0, Math.floor(camera.y / (tileSize * zoomScale)) - 2);
-    const endRow = Math.min(gameMap.height, Math.floor((camera.y + canvas.height) / (tileSize * zoomScale)) + 2);
-    const startCol = Math.max(0, Math.floor(camera.x / (tileSize * zoomScale)) - 2);
-    const endCol = Math.min(gameMap.width, Math.floor((camera.x + canvas.width) / (tileSize * zoomScale)) + 2);
+    const tileSize = 8; // 8px base tiles, zoomed 2x for 16px on screen
+    // Visible tile range in world space (camera is already in world coordinates)
+    const visibleWorldW = canvas.width / zoomScale;
+    const visibleWorldH = canvas.height / zoomScale;
+    const startRow = Math.max(0, Math.floor(camera.y / tileSize) - 2);
+    const endRow = Math.min(gameMap.height, Math.ceil((camera.y + visibleWorldH) / tileSize) + 2);
+    const startCol = Math.max(0, Math.floor(camera.x / tileSize) - 2);
+    const endCol = Math.min(gameMap.width, Math.ceil((camera.x + visibleWorldW) / tileSize) + 2);
     
     const assets = gameWorldState.current.assets || {};
     const tilesetImg = assets.tileset;
@@ -1887,18 +2371,15 @@ function App() {
       return 32;
     })();
 
-    // Colorful mapping with simple variants to reduce repetition
-    const tilesetVariants = {
-      6: [[0,0],[1,1],[2,1]],           // deep water variants
-      7: [[1,0],[2,0],[3,0]],           // shallow water variants
-      2: [[2,0],[2,1],[2,2],[3,2]],     // sand variants
-      1: [[3,0],[3,1],[4,1]],           // dirt/path variants
-      3: [[4,0],[4,1],[5,1],[5,0]],     // grass variants
-      5: [[5,0],[6,1]],                 // rock/stone floor
-      25:[[6,0],[6,1],[7,1]],           // mountain variants
-      26:[[1,0],[2,0],[3,0]],           // river use shallow water variants
-      27:[[4,0],[5,0],[4,1]],           // forest base -> grass family
-      28:[[3,1],[4,2],[5,2]]            // village/cobble/road
+    // Colorful mapping for 256x256 tileset (8x8 grid of 32px tiles, cols 0-7, rows 0-7)
+    // At 8px game tile size, the tileset gets too compressed. Use individual tile variants instead.
+    const groundTileVariants = assets.groundTileVariants || [];
+
+    // Map tile types to individual ground tile variant indices for terrain diversity
+    // Only use FieldsTile images for dirt/sand/village (where earthy textures make sense)
+    // Water, grass, forest, mountain use hand-painted colors for correct appearance
+    const tileTypeToVariantIdx = {
+      1: 3, 2: 2, 28: 5
     };
 
     const drawTilesetCell = (img, col, row, dx, dy, size) => {
@@ -1910,19 +2391,104 @@ function App() {
       }
     };
 
+    const drawTerrainTile = (tileType, x, y, size) => {
+      const col = Math.floor(x / size);
+      const row = Math.floor(y / size);
+      const hash = ((row * 73856093) ^ (col * 19349663)) >>> 0;
+      const parity = (col + row) & 1;
+
+      // Try to use tile image variant for earthy terrain (dirt, sand, village)
+      const varIdx = tileTypeToVariantIdx[tileType];
+      const varImg = (varIdx !== undefined) ? groundTileVariants[varIdx] : null;
+      if (varImg) {
+        ctx.drawImage(varImg, 0, 0, varImg.width, varImg.height, x, y, size, size);
+        // Subtle tint for village tiles
+        if (tileType === 28) { ctx.fillStyle = 'rgba(140,100,50,0.15)'; ctx.fillRect(x, y, size, size); }
+        return;
+      }
+
+      // Fallback: hand-painted tile colors with variety
+      if (tileType === 6) {
+        // Deep water - rich dark blue
+        ctx.fillStyle = parity ? '#14324f' : '#193a58';
+        ctx.fillRect(x, y, size, size);
+        if (hash % 5 === 0) { ctx.fillStyle = 'rgba(60,140,200,0.10)'; ctx.fillRect(x, y + (hash % 4), size, 1); }
+        return;
+      }
+      if (tileType === 7 || tileType === 26) {
+        // Shallow water / River - bright blue with wave highlights
+        ctx.fillStyle = tileType === 26 ? '#2e7ab5' : (parity ? '#3388bb' : '#3d96cc');
+        ctx.fillRect(x, y, size, size);
+        if (hash % 3 === 0) { ctx.fillStyle = 'rgba(255,255,255,0.18)'; ctx.fillRect(x, y + (hash % 3) + 1, size, 1); }
+        return;
+      }
+      if (tileType === 2) {
+        // Sand - warm golden yellow
+        ctx.fillStyle = parity ? '#e0be6a' : '#eace80';
+        ctx.fillRect(x, y, size, size);
+        if (hash % 4 === 0) { ctx.fillStyle = 'rgba(140,100,40,0.10)'; ctx.fillRect(x + (hash % 3), y + (hash % 4), 2, 1); }
+        return;
+      }
+      if (tileType === 1) {
+        // Dirt - earthy brown
+        ctx.fillStyle = parity ? '#8b6530' : '#9a7040';
+        ctx.fillRect(x, y, size, size);
+        if (hash % 4 === 0) { ctx.fillStyle = 'rgba(50,30,15,0.12)'; ctx.fillRect(x, y + (hash % 3), size, 1); }
+        return;
+      }
+      if (tileType === 3) {
+        // Grass - vibrant green with checkerboard variation
+        const shade = hash % 8;
+        ctx.fillStyle = shade < 2 ? '#45a64e' : shade < 4 ? '#4db056' : shade < 6 ? '#3e9c48' : '#52b85c';
+        ctx.fillRect(x, y, size, size);
+        // Add grass texture dots
+        if (hash % 5 === 0) { ctx.fillStyle = 'rgba(30,80,25,0.18)'; ctx.fillRect(x + 2, y + 2, 2, 1); }
+        if (hash % 7 === 0) { ctx.fillStyle = 'rgba(100,200,80,0.15)'; ctx.fillRect(x + (hash % 4), y + (hash % 5), 1, 1); }
+        return;
+      }
+      if (tileType === 27) {
+        // Forest - deep rich green with canopy texture
+        ctx.fillStyle = parity ? '#1f6828' : '#257832';
+        ctx.fillRect(x, y, size, size);
+        // Canopy shadow spots
+        ctx.fillStyle = 'rgba(5,30,8,0.28)';
+        ctx.fillRect(x + (hash % 4), y + (hash % 3), 3, 3);
+        if (hash % 3 === 0) { ctx.fillStyle = 'rgba(80,160,50,0.12)'; ctx.fillRect(x + 1, y + 1, 2, 1); }
+        return;
+      }
+      if (tileType === 25 || tileType === 5) {
+        // Mountain / Rock - grey-purple with highlights
+        ctx.fillStyle = tileType === 25 ? (parity ? '#6b6570' : '#7a7480') : (parity ? '#5a5a5e' : '#646468');
+        ctx.fillRect(x, y, size, size);
+        ctx.fillStyle = 'rgba(0,0,0,0.15)'; ctx.fillRect(x, y, size, 1);
+        if (hash % 4 === 0) { ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(x + (hash % 4), y + 2, 2, 1); }
+        return;
+      }
+      if (tileType === 28) {
+        // Village - warm brown cobblestone
+        ctx.fillStyle = parity ? '#a87030' : '#b88040';
+        ctx.fillRect(x, y, size, size);
+        if (hash % 3 === 0) { ctx.fillStyle = 'rgba(220,190,140,0.18)'; ctx.fillRect(x + 1, y + 1, 3, 1); }
+        return;
+      }
+      // Void/empty tiles - very dark
+      ctx.fillStyle = '#080c14';
+      ctx.fillRect(x, y, size, size);
+    };
+
     const tileColor = (t) => {
       switch (t) {
-        case 6: return '#0f2a4d';
-        case 7: return '#2f74c0';
-        case 2: return '#e8c27a';
-        case 1: return '#8b5e3b';
-        case 3: return '#3a8e41';
-        case 27: return '#1f6b2a';
-        case 5: return '#6b6b6b';
-        case 25: return '#8a7f70';
-        case 26: return '#2b80ff';
-        case 28: return '#a56b2b';
-        default: return '#000000';
+        case 6: return '#14324f';
+        case 7: return '#3388bb';
+        case 2: return '#e0be6a';
+        case 1: return '#8b6530';
+        case 3: return '#45a64e';
+        case 27: return '#1f6828';
+        case 5: return '#5a5a5e';
+        case 25: return '#6b6570';
+        case 26: return '#2e7ab5';
+        case 28: return '#a87030';
+        default: return '#080c14';
       }
     };
     for (let row = startRow; row < endRow; row++) {
@@ -1932,93 +2498,136 @@ function App() {
         const mw = motherWorldRef.current;
         const tileType = mw?.tiles?.[row]?.[col] ?? 0;
         
-        // Prefer colorful tileset when available; fall back to solid colors/assets
-        const variantList = tilesetImg ? tilesetVariants[tileType] : null;
-        if (tilesetImg && variantList && variantList.length) {
-          const h = (((row * 73856093) ^ (col * 19349663)) >>> 0) % variantList.length;
-          const [cv, rv] = variantList[h];
-          drawTilesetCell(tilesetImg, cv, rv, x, y, tileSize);
-        } else if ((tileType === 3 || tileType === 4) && assets.ground) {
-          ctx.drawImage(assets.ground, x, y, tileSize, tileSize);
-        } else {
-          // Clean fallback fills for water to reduce noise
-          if (tileType === 6) { ctx.fillStyle = '#14406f'; ctx.fillRect(x, y, tileSize, tileSize); }
-          else if (tileType === 7 || tileType === 26) { ctx.fillStyle = '#4ea4e5'; ctx.fillRect(x, y, tileSize, tileSize); }
-          else { ctx.fillStyle = tileColor(tileType); ctx.fillRect(x, y, tileSize, tileSize); }
-        }
+        // Draw solid color base first (always works)
+        drawTerrainTile(tileType, x, y, tileSize);
 
-        // Overlays to add richness
-        if (tileType === 27 && assets.tree) {
-          // forest: sprinkle trees and occasional bushes
-          if ((((row * 73856093) ^ (col * 19349663)) & 7) !== 0) {
-            ctx.drawImage(assets.tree, x - 2, y - 10, tileSize + 4, tileSize + 12);
+        // Decorative detail noise key
+        const noiseKey = ((row * 73856093) ^ (col * 19349663)) >>> 0;
+        
+        // Draw small decorative sprites on terrain tiles (reduced frequency for perf)
+        if (tileType === 27 && (noiseKey % 6 === 0)) {
+          // Forest tiles: draw tree decoration
+          const treeImg = (noiseKey % 8 < 4) ? assets.treeSmall : assets.treeMedium;
+          if (treeImg) {
+            ctx.drawImage(treeImg, x - 4, y - 10, 16, 18);
+          } else {
+            ctx.fillStyle = 'rgba(12, 48, 18, 0.4)';
+            ctx.beginPath();
+            ctx.arc(x + 4, y, 3, 0, Math.PI * 2);
+            ctx.fill();
           }
-          if (assets.bush && (((row * 2654435761 + col) >>> 0) % 11 === 0)) {
-            ctx.drawImage(assets.bush, x, y, tileSize, tileSize);
+        } else if (tileType === 25 && (noiseKey % 5 === 0)) {
+          // Mountain tiles: draw stone
+          const rockImg = assets.rock;
+          if (rockImg) {
+            ctx.drawImage(rockImg, x - 2, y - 2, 12, 10);
+          } else {
+            ctx.fillStyle = 'rgba(40, 40, 40, 0.35)';
+            ctx.fillRect(x + 1, y + 1, 5, 4);
           }
-        } else if (tileType === 25 && assets.rock) {
-          // mountain: rocks
-          if (((row * 83492791) ^ (col * 2971215073)) & 1) {
-            ctx.drawImage(assets.rock, x, y, tileSize, tileSize);
+        } else if (tileType === 3 && (noiseKey % 10 === 0)) {
+          // Grass tiles: draw bush/flower
+          const bushImg = assets.bush;
+          if (bushImg) {
+            ctx.drawImage(bushImg, x - 1, y - 2, 10, 8);
+          } else {
+            ctx.fillStyle = 'rgba(80, 160, 70, 0.35)';
+            ctx.fillRect(x + 2, y + 2, 4, 3);
           }
-        } else if (tileType === 28 && assets.house) {
-          // village: occasional house footprint
-          if (!((row + col) % 7)) {
-            ctx.drawImage(assets.house, x - 4, y - 12, tileSize + 8, tileSize + 16);
+        } else if (tileType === 28 && (noiseKey % 8 === 0)) {
+          // Village: draw small decoration
+          const stoneImg = assets.stump;
+          if (stoneImg) {
+            ctx.globalAlpha = 0.55;
+            ctx.drawImage(stoneImg, x, y, 8, 7);
+            ctx.globalAlpha = 1.0;
           }
-          if (assets.well && (((row + 3 * col) >>> 0) % 19 === 0)) {
-            ctx.drawImage(assets.well, x, y - 6, tileSize, tileSize + 6);
-          }
-          if (assets.barrel && (((5 * row + col) >>> 0) % 23 === 0)) {
-            ctx.drawImage(assets.barrel, x, y, tileSize, tileSize);
-          }
-        } else if (tileType === 3) {
-          // grass: occasional decor to reduce flat look
-          if (assets.bush && (((row + col * 7) >>> 0) % 31 === 0)) {
-            ctx.drawImage(assets.bush, x, y, tileSize, tileSize);
-          } else if (assets.stump && (((row * 13 + col) >>> 0) % 37) === 0) {
-            ctx.drawImage(assets.stump, x, y, tileSize, tileSize);
-          }
-        } else if (tileType === 15 && assets.tree) {
-          // explicit tree trunk tiles
-          ctx.drawImage(assets.tree, x - 2, y - 10, tileSize + 4, tileSize + 12);
-        } else if (tileType === 5 && assets.rock) {
-          ctx.drawImage(assets.rock, x, y, tileSize, tileSize);
+        } else if (tileType === 2 && (noiseKey % 14 === 0)) {
+          // Sand: draw shell/pebble
+          ctx.fillStyle = 'rgba(180,160,120,0.3)';
+          ctx.fillRect(x + 2, y + 3, 3, 2);
         }
       }
     }
 
-    // Draw props (bridges, houses, bushes, rocks, trees)
+    // Draw props using external asset images with vector fallback
     if (currentArea.props && currentArea.props.length) {
       currentArea.props.forEach(p => {
-        const img = assets[p.type];
-        if (img) {
-          const w = (p.type === 'treeMedium') ? 24 : (p.type === 'bridgeH') ? 28 : 16;
-          const h = (p.type === 'treeMedium') ? 28 : (p.type === 'bridgeH') ? 8 : 16;
-          const dx = p.type.startsWith('tree') ? -4 : 0;
-          const dy = p.type.startsWith('tree') ? -12 : 0;
-          ctx.drawImage(img, p.x + dx, p.y + dy, w, h);
+        const propImg = assets[p.type];
+        if (propImg && propImg.width > 0) {
+          // Scale prop images appropriately for the game world
+          // Small props (stone, grass, box) get 2-3x, big props (house, tent) get scaled to fit
+          const targetSizes = {
+            house: { w: 72, h: 68 }, well: { w: 32, h: 30 }, barrel: { w: 20, h: 22 },
+            bridgeH: { w: 48, h: 16 }, bridgeV: { w: 16, h: 48 }, chest: { w: 22, h: 22 },
+            tent: { w: 56, h: 50 }, windmill: { w: 80, h: 78 }, tower: { w: 80, h: 82 },
+            fenceH: { w: 36, h: 14 }, fenceV: { w: 14, h: 36 }, rock: { w: 24, h: 20 },
+            bush: { w: 22, h: 16 }, stump: { w: 20, h: 18 }, treeSmall: { w: 18, h: 22 },
+            treeMedium: { w: 24, h: 30 }, door: { w: 20, h: 28 }, doubleDoor: { w: 32, h: 28 }
+          };
+          const target = targetSizes[p.type] || { w: 20, h: 20 };
+          ctx.drawImage(propImg, p.x - target.w / 2, p.y - target.h, target.w, target.h);
+        } else if (p.type === 'house') {
+          ctx.fillStyle = '#8f5b3a';
+          ctx.fillRect(p.x - 16, p.y - 22, 32, 24);
+          ctx.fillStyle = '#5c3a26';
+          ctx.fillRect(p.x - 18, p.y - 28, 36, 8);
+        } else if (p.type === 'well') {
+          ctx.fillStyle = '#6d737a';
+          ctx.fillRect(p.x - 6, p.y - 6, 12, 12);
+        } else if (p.type === 'barrel') {
+          ctx.fillStyle = '#6e4a2c';
+          ctx.fillRect(p.x - 5, p.y - 6, 10, 12);
+        } else if (p.type === 'bridgeH') {
+          ctx.fillStyle = '#8b5e3b';
+          ctx.fillRect(p.x - 12, p.y - 3, 24, 6);
+        } else if (p.type === 'bridgeV') {
+          ctx.fillStyle = '#8b5e3b';
+          ctx.fillRect(p.x - 3, p.y - 12, 6, 24);
+        } else if (p.type === 'rock') {
+          ctx.fillStyle = '#888';
+          ctx.fillRect(p.x - 8, p.y - 6, 16, 12);
+        } else if (p.type === 'bush') {
+          ctx.fillStyle = '#2d7a32';
+          ctx.fillRect(p.x - 7, p.y - 5, 14, 10);
+        } else if (p.type === 'chest') {
+          ctx.fillStyle = '#b8860b';
+          ctx.fillRect(p.x - 8, p.y - 7, 16, 14);
+        } else if (p.type === 'tent') {
+          ctx.fillStyle = '#c69c6d';
+          ctx.fillRect(p.x - 16, p.y - 18, 32, 22);
+        } else {
+          ctx.fillStyle = '#666';
+          ctx.fillRect(p.x - 8, p.y - 8, 16, 16);
         }
       });
     }
     
-    // Draw NPCs using assets if available. Many NPC sheets contain multiple frames;
-    // crop the top-left frame to avoid drawing the entire spritesheet.
+    // Draw NPCs using closest matching asset images
     currentArea.npcs?.forEach(npc => {
+      // NPCs at villages: use house image for the village structure background
+      const houseImg = assets['house'];
+      if (houseImg && houseImg.width > 0) {
+        ctx.drawImage(houseImg, npc.x - 36, npc.y - 56, 72, 68);
+      }
+
+      // Draw NPC character on top
       const npcImg = assets['villager'] || assets['npc'];
       if (npcImg && npcImg.width && npcImg.height) {
-        // Heuristically infer grid to crop one frame instead of scaling the whole sheet
         const ratio = npcImg.width / npcImg.height;
         let cols = 1, rows = 1;
         if (ratio >= 1.5) { cols = Math.min(8, Math.max(2, Math.round(ratio))); rows = 1; }
         else if ((1/ratio) >= 1.5) { rows = Math.min(8, Math.max(2, Math.round(1/ratio))); cols = 1; }
         const frameW = Math.floor(npcImg.width / cols);
         const frameH = Math.floor(npcImg.height / rows);
-        const destW = 24; const destH = 32;
-        ctx.drawImage(npcImg, 0, 0, frameW, frameH, npc.x - Math.floor(destW/2), npc.y - destH, destW, destH);
+        const destW = 30; const destH = 38;
+        ctx.drawImage(npcImg, 0, 0, frameW, frameH, npc.x - Math.floor(destW/2), npc.y - destH + 10, destW, destH);
       } else {
-      ctx.fillStyle = npc.color || '#8B4513';
-        ctx.fillRect(npc.x - 12, npc.y - 32, 24, 32);
+        // Fallback: draw a simple villager shape
+        ctx.fillStyle = '#dbb87a';
+        ctx.fillRect(npc.x - 6, npc.y - 18, 12, 18); // body
+        ctx.fillStyle = '#f5d6a0';
+        ctx.fillRect(npc.x - 5, npc.y - 26, 10, 8); // head
       }
       // Show label only when close to player to reduce clutter
       const player = gameWorldState.current.player;
@@ -2034,23 +2643,100 @@ function App() {
       }
     });
     
-    // Draw treasures
+    // Draw treasures — bold glowing items, impossible to miss
+    const sparkleFrames = assets.sparkleFrames || [];
+    const sparkleFrame = sparkleFrames.length
+      ? sparkleFrames[Math.floor(Date.now() / 120) % sparkleFrames.length]
+      : null;
     currentArea.treasures?.forEach(treasure => {
       if (!treasure.collected) {
-        ctx.fillStyle = '#E84142'; // AVAX red color for all treasures
-        ctx.fillRect(treasure.x, treasure.y, 20, 20);
-        
-        // Draw sparkle effect
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(treasure.x + 6, treasure.y + 6, 3, 3);
-        ctx.fillRect(treasure.x + 12, treasure.y + 12, 3, 3);
-        
-        // Optional label using type
-        const tLabel = treasure.type ? String(treasure.type) : '';
-        if (tLabel) {
-        ctx.fillStyle = '#FFFFFF';
-        ctx.font = '10px monospace';
-          ctx.fillText(tLabel, treasure.x - 5, treasure.y - 5);
+        const t = Date.now();
+        const bob = Math.sin(t * 0.004 + treasure.x * 0.02 + treasure.y * 0.015) * 3;
+        const isChest = treasure.type === 'chest' || treasure.type === 'rare_chest';
+        const chestImg = assets.chest || assets.barrel;
+
+        if (isChest) {
+          // Glow under chest
+          const glowAlpha = 0.2 + 0.1 * Math.sin(t * 0.003);
+          ctx.fillStyle = treasure.type === 'rare_chest'
+            ? `rgba(255, 200, 0, ${glowAlpha})`
+            : `rgba(180, 140, 50, ${glowAlpha})`;
+          ctx.beginPath();
+          ctx.arc(treasure.x + 10, treasure.y + 10, 16, 0, Math.PI * 2);
+          ctx.fill();
+          // Chest sprite or fallback
+          if (chestImg && chestImg.width > 0) {
+            ctx.drawImage(chestImg, treasure.x - 4, treasure.y - 2, 28, 26);
+          } else {
+            ctx.fillStyle = '#7c4a1f';
+            ctx.fillRect(treasure.x, treasure.y + 2, 20, 14);
+            ctx.fillStyle = '#d4a017';
+            ctx.fillRect(treasure.x - 1, treasure.y, 22, 5);
+            ctx.fillStyle = '#ffd700';
+            ctx.fillRect(treasure.x + 7, treasure.y + 5, 6, 5);
+          }
+          // Sparkle
+          if (sparkleFrame) {
+            ctx.drawImage(sparkleFrame, treasure.x - 6, treasure.y - 12, 32, 32);
+          }
+        } else {
+          // ===== GOLD COIN — large, glowing, unmissable =====
+          const cx = treasure.x + 8;
+          const cy = treasure.y + bob;
+          const coinRadius = 7;
+
+          // Outer pulsing glow ring
+          const pulse = 0.4 + 0.3 * Math.sin(t * 0.005 + treasure.x);
+          ctx.beginPath();
+          ctx.arc(cx, cy, coinRadius + 6, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255, 215, 0, ${pulse * 0.25})`;
+          ctx.fill();
+
+          // Inner glow
+          ctx.beginPath();
+          ctx.arc(cx, cy, coinRadius + 3, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255, 230, 80, ${pulse * 0.3})`;
+          ctx.fill();
+
+          // Coin body
+          ctx.beginPath();
+          ctx.arc(cx, cy, coinRadius, 0, Math.PI * 2);
+          ctx.fillStyle = '#ffd700';
+          ctx.fill();
+          ctx.strokeStyle = '#b8860b';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+
+          // Inner circle detail
+          ctx.beginPath();
+          ctx.arc(cx, cy, coinRadius - 2.5, 0, Math.PI * 2);
+          ctx.strokeStyle = '#daa520';
+          ctx.lineWidth = 0.8;
+          ctx.stroke();
+
+          // Dollar/star mark
+          ctx.fillStyle = '#b8860b';
+          ctx.font = 'bold 8px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('$', cx, cy + 3);
+          ctx.textAlign = 'start';
+
+          // Shine highlight
+          ctx.fillStyle = 'rgba(255, 255, 240, 0.6)';
+          ctx.beginPath();
+          ctx.arc(cx - 2, cy - 2, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Twinkling sparkle
+          const sparkT = Math.floor(t / 250) % 6;
+          if (sparkT < 2) {
+            ctx.fillStyle = '#FFFFFF';
+            const sx = cx + coinRadius + 2 + sparkT * 2;
+            const sy = cy - coinRadius + sparkT;
+            ctx.fillRect(sx, sy, 2, 2);
+            ctx.fillRect(sx + 1, sy - 1, 1, 1);
+            ctx.fillRect(sx - 1, sy + 1, 1, 1);
+          }
         }
       }
     });
@@ -2058,54 +2744,76 @@ function App() {
     // Draw enemies by type and state
     gameWorldState.current.enemies.forEach(enemy => {
       let enemyImg = null;
-      if (enemy.type === 'boar') enemyImg = assets['boar'] || assets['enemy'];
-      else if (enemy.type === 'bee') enemyImg = assets['bee'] || assets['enemy'];
+      if (enemy.type === 'bee') enemyImg = assets['bee'] || assets['enemy'];
       else if (enemy.type === 'snail') enemyImg = assets['snail'] || assets['enemy'];
-      else enemyImg = assets['enemy'];
+      else enemyImg = assets['bee'] || assets['enemy'];
       
-      // Difficulty color tint
+      // Compute draw rect once (shared by tint, sprite, health bar)
+      const drawW = enemy.renderWidth || 22;
+      const drawH = enemy.renderHeight || 22;
+      const drawX = enemy.x - Math.floor((drawW - enemy.width) / 2);
+      const drawY = enemy.y - (enemy.yOffset || 8);
+
+      // Hit flash — aligned to sprite rect
       if (enemy.state === 'hit') {
-        ctx.fillStyle = 'rgba(255,0,0,0.5)';
-      ctx.fillRect(enemy.x, enemy.y, enemy.width, enemy.height);
+        ctx.fillStyle = 'rgba(255,60,60,0.35)';
+        ctx.fillRect(drawX - 1, drawY - 1, drawW + 2, drawH + 2);
       }
-      
-      if (enemyImg) {
-        // Flip sprite based on facing direction
+
+      if (enemyImg && enemyImg.width > 0) {
+        // Measured frame sizes from actual sprite sheets
+        // Boar Idle: 192×32 → 6 frames 32×32
+        // Bee Fly:  256×64 → 4 frames 64×64
+        // Snail Walk: 384×32 → 12 frames 32×32
+        let frameW, frameH;
+        if (enemy.type === 'bee') {
+          frameW = 64; frameH = 64;
+        } else {
+          frameW = 32; frameH = 32;
+        }
+
+        const totalFrames = Math.max(1, Math.floor(enemyImg.width / frameW));
+        const animRate = enemy.state === 'attack' ? 100 : enemy.state === 'chase' ? 130 : 180;
+        const frame = Math.floor(Date.now() / animRate) % totalFrames;
+        const sx = frame * frameW;
+        const sy = 0;
+
         ctx.save();
         if (!enemy.facingRight) {
           ctx.scale(-1, 1);
-          ctx.drawImage(enemyImg, -enemy.x - enemy.width, enemy.y, enemy.width, enemy.height);
+          ctx.drawImage(enemyImg, sx, sy, frameW, frameH, -drawX - drawW, drawY, drawW, drawH);
         } else {
-          ctx.drawImage(enemyImg, enemy.x, enemy.y, enemy.width, enemy.height);
+          ctx.drawImage(enemyImg, sx, sy, frameW, frameH, drawX, drawY, drawW, drawH);
         }
         ctx.restore();
       } else {
-        // Fallback colors by type and difficulty
+        // Fallback colored rects by type
         let baseColor;
-        if (enemy.type === 'boar') baseColor = '#8B4513';
-        else if (enemy.type === 'bee') baseColor = '#FFD700';
+        if (enemy.type === 'bee') baseColor = '#FFD700';
         else if (enemy.type === 'snail') baseColor = '#90EE90';
-        else baseColor = '#E74C3C';
-        
-        // Difficulty border
+        else baseColor = '#FFD700';
+
         if (enemy.difficulty === 'hard') {
           ctx.fillStyle = '#FF0000';
-          ctx.fillRect(enemy.x - 2, enemy.y - 2, enemy.width + 4, enemy.height + 4);
+          ctx.fillRect(drawX - 1, drawY - 1, drawW + 2, drawH + 2);
         } else if (enemy.difficulty === 'medium') {
           ctx.fillStyle = '#FFA500';
-          ctx.fillRect(enemy.x - 1, enemy.y - 1, enemy.width + 2, enemy.height + 2);
+          ctx.fillRect(drawX, drawY, drawW + 1, drawH + 1);
         }
-        
+
         ctx.fillStyle = baseColor;
-        ctx.fillRect(enemy.x, enemy.y, enemy.width, enemy.height);
+        ctx.fillRect(drawX, drawY, drawW, drawH);
       }
-      
-      // Health bar
+
+      // Health bar — only when damaged, positioned just above sprite
       const healthPercent = enemy.health / enemy.maxHealth;
-      ctx.fillStyle = 'rgba(0,0,0,0.5)';
-      ctx.fillRect(enemy.x, enemy.y - 8, enemy.width, 4);
-      ctx.fillStyle = healthPercent > 0.5 ? '#00FF00' : healthPercent > 0.25 ? '#FFFF00' : '#FF0000';
-      ctx.fillRect(enemy.x, enemy.y - 8, enemy.width * healthPercent, 4);
+      if (healthPercent < 1) {
+        const hpY = drawY - 5;
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(drawX, hpY, drawW, 3);
+        ctx.fillStyle = healthPercent > 0.5 ? '#00FF00' : healthPercent > 0.25 ? '#FFFF00' : '#FF0000';
+        ctx.fillRect(drawX, hpY, drawW * healthPercent, 3);
+      }
     });
     
     // Weather overlays disabled unless explicitly enabled (remove falling dots effect)
@@ -2142,6 +2850,7 @@ function App() {
     // Draw knight with proper sprite sheet animations
     const player = gameWorldState.current.player;
     const knightAssets = assets.knight || {};
+    const knightFrameConfig = assets.knightFrameConfig || {};
     
     // Debug: Log available knight assets and force visibility
     if (!window.knightAssetsLogged) {
@@ -2156,43 +2865,53 @@ function App() {
     }
     
     let spriteSheet = null;
+    let knightAnimState = 'idle';
     let frameCount = 10; // default frame count
     let currentFrame = player.animFrame;
     
     // Select appropriate sprite sheet based on state
     if (player.state === 'attack' && knightAssets.attack) {
       spriteSheet = knightAssets.attack;
+      knightAnimState = 'attack';
       frameCount = 6; // Attack animation frames
       currentFrame = Math.floor((30 - player.attackCooldown) / 5) % frameCount;
     } else if (player.state === 'attack2' && knightAssets.attack2) {
       spriteSheet = knightAssets.attack2;
+      knightAnimState = 'attack2';
       frameCount = 6;
       currentFrame = Math.floor((35 - player.attackCooldown) / 6) % frameCount;
     } else if (player.state === 'attackCombo' && knightAssets.attackCombo) {
       spriteSheet = knightAssets.attackCombo;
+      knightAnimState = 'attackCombo';
       frameCount = 10;
       currentFrame = Math.floor((45 - player.attackCooldown) / 4.5) % frameCount;
     } else if ((player.state === 'defend' || player.isEating) && knightAssets.defend) {
       spriteSheet = knightAssets.defend;
+      knightAnimState = 'defend';
       frameCount = 4;
       currentFrame = player.isEating ? Math.floor(player.eatTimer / 15) % frameCount : 0;
     } else if (player.state === 'roll' && knightAssets.roll) {
       spriteSheet = knightAssets.roll;
+      knightAnimState = 'roll';
       frameCount = 7;
       currentFrame = Math.floor((20 - player.invulnerable) / 3) % frameCount;
     } else if (player.state === 'hit' && knightAssets.hit) {
       spriteSheet = knightAssets.hit;
+      knightAnimState = 'hit';
       frameCount = 3;
       currentFrame = Math.floor((30 - player.invulnerable) / 10) % frameCount;
     } else if (player.state === 'death' && knightAssets.death) {
       spriteSheet = knightAssets.death;
+      knightAnimState = 'death';
       frameCount = 10;
       currentFrame = Math.min(9, Math.floor(player.animFrame));
     } else if (player.state === 'run' && knightAssets.run) {
       spriteSheet = knightAssets.run;
+      knightAnimState = 'run';
       frameCount = 8;
     } else if (knightAssets.idle) {
       spriteSheet = knightAssets.idle;
+      knightAnimState = 'idle';
       frameCount = 10;
     }
     
@@ -2200,10 +2919,13 @@ function App() {
     // console.log('🎯 Drawing knight at:', player.x, player.y, 'State:', player.state, 'Frame:', currentFrame);
     
     if (spriteSheet && spriteSheet.width > 0) {
-      // Each frame is 120x80 pixels in the sprite sheet
-      const frameWidth = 120;
-      const frameHeight = 80;
-      const framesPerRow = 10;
+      const config = knightFrameConfig[knightAnimState] || {};
+      const frameWidth = config.frameWidth || 120;
+      const frameHeight = config.frameHeight || 80;
+      const framesPerRow = config.framesPerRow || Math.max(1, Math.floor(spriteSheet.width / frameWidth));
+      const availableFrames = config.totalFrames || Math.max(1, Math.floor(spriteSheet.width / frameWidth) * Math.floor(spriteSheet.height / frameHeight));
+      frameCount = Math.max(1, Math.min(frameCount, availableFrames));
+      currentFrame = Math.floor(currentFrame) % frameCount;
       
       const row = Math.floor(currentFrame / framesPerRow);
       const col = currentFrame % framesPerRow;
@@ -2244,6 +2966,37 @@ function App() {
       }
     ctx.restore();
       
+      // Draw clean slash effect when player is attacking
+      if (player.state && player.state.includes('attack')) {
+        const slashProgress = Math.max(0, (30 - player.attackCooldown) / 30);
+        if (slashProgress < 0.6) {
+          ctx.save();
+          ctx.globalAlpha = 1 - slashProgress * 1.5;
+          const slashX = player.facingRight ? drawX + drawWidth - 4 : drawX - 20;
+          const slashY = drawY + 8;
+          // White slash arc
+          ctx.strokeStyle = '#FFFFFF';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          if (player.facingRight) {
+            ctx.arc(slashX, slashY + 16, 18 + slashProgress * 12, -Math.PI * 0.6, Math.PI * 0.3);
+          } else {
+            ctx.arc(slashX + 20, slashY + 16, 18 + slashProgress * 12, Math.PI * 0.7, Math.PI * 1.6);
+          }
+          ctx.stroke();
+          // Impact sparks
+          ctx.fillStyle = '#FFD700';
+          for (let i = 0; i < 3; i++) {
+            const sparkAngle = slashProgress * Math.PI * 2 + i * 2.1;
+            const sparkDist = 12 + slashProgress * 16;
+            const sx = (player.facingRight ? slashX : slashX + 20) + Math.cos(sparkAngle) * sparkDist;
+            const sy = slashY + 16 + Math.sin(sparkAngle) * sparkDist;
+            ctx.fillRect(sx, sy, 2, 2);
+          }
+          ctx.restore();
+        }
+      }
+
       // Remove debug text for clean look
       // ctx.fillStyle = '#FFFFFF';
       // ctx.font = '16px Arial';
@@ -2329,9 +3082,11 @@ function App() {
     // Restore context (removes zoom and translation)
     ctx.restore();
     
-    // UI elements are drawn in screen space (not zoomed)
+    // Re-enable smoothing for crisp HUD text and UI elements
+    if (typeof ctx.imageSmoothingEnabled === 'boolean') ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
     
-      // Draw UI
+    // UI elements are drawn in screen space (not zoomed)
       drawUI(ctx);
     } catch (error) {
       console.error('Render error:', error);
@@ -2348,34 +3103,266 @@ function App() {
   // Minimal HUD with non-overlapping rows
   const drawUI = (ctx) => {
     const canvas = canvasRef.current;
+    const assets = gameWorldState.current.assets || {};
     const area = gameMap.areas[gameMap.currentArea];
-    const row1Y = 18;
-    const row2Y = 34;
-    // Background bar
-    ctx.fillStyle = 'rgba(0,0,0,0.78)';
-    ctx.fillRect(0, 0, canvas.width, 42);
-    // Row 1: area + stats + points
+    const W = canvas.width;
+    const barH = 52;
+
+    // Ensure smoothing is on for clean HUD rendering
+    if (typeof ctx.imageSmoothingEnabled === 'boolean') ctx.imageSmoothingEnabled = true;
+
+    // ── Top bar background ── clean gradient (no tiled bookBar for sharpness)
+    const grad = ctx.createLinearGradient(0, 0, 0, barH);
+    grad.addColorStop(0, 'rgba(12, 8, 6, 0.94)');
+    grad.addColorStop(0.7, 'rgba(24, 16, 10, 0.90)');
+    grad.addColorStop(1, 'rgba(36, 24, 14, 0.85)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, barH);
+    // Subtle inner highlight
+    ctx.fillStyle = 'rgba(200, 170, 110, 0.08)';
+    ctx.fillRect(0, 0, W, 1);
+    // Bottom border accent
+    ctx.fillStyle = 'rgba(180, 140, 80, 0.55)';
+    ctx.fillRect(0, barH - 1, W, 1);
+
+    // ── Area name badge ──
+    const areaName = area?.name || "Devil's World";
+    ctx.font = 'bold 15px "Segoe UI", Arial, sans-serif';
+    const nameW = ctx.measureText(areaName).width;
+    const badgePad = 10;
+    const badgeX = 12;
+    const badgeY = 7;
+    const badgeW = nameW + badgePad * 2;
+    const badgeH = 22;
+    // Badge background with subtle gradient
+    const badgeGrad = ctx.createLinearGradient(badgeX, badgeY, badgeX, badgeY + badgeH);
+    badgeGrad.addColorStop(0, 'rgba(40, 25, 12, 0.7)');
+    badgeGrad.addColorStop(1, 'rgba(20, 12, 6, 0.6)');
+    ctx.fillStyle = badgeGrad;
+    ctx.beginPath();
+    ctx.moveTo(badgeX + 5, badgeY);
+    ctx.lineTo(badgeX + badgeW - 5, badgeY);
+    ctx.quadraticCurveTo(badgeX + badgeW, badgeY, badgeX + badgeW, badgeY + 5);
+    ctx.lineTo(badgeX + badgeW, badgeY + badgeH - 5);
+    ctx.quadraticCurveTo(badgeX + badgeW, badgeY + badgeH, badgeX + badgeW - 5, badgeY + badgeH);
+    ctx.lineTo(badgeX + 5, badgeY + badgeH);
+    ctx.quadraticCurveTo(badgeX, badgeY + badgeH, badgeX, badgeY + badgeH - 5);
+    ctx.lineTo(badgeX, badgeY + 5);
+    ctx.quadraticCurveTo(badgeX, badgeY, badgeX + 5, badgeY);
+    ctx.fill();
+    // Badge border
+    ctx.strokeStyle = 'rgba(200, 170, 100, 0.4)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    // Badge text
+    ctx.fillStyle = '#f5e0a0';
     ctx.textAlign = 'start';
-    ctx.fillStyle = '#FFFFFF';
-    ctx.font = 'bold 13px monospace';
-    ctx.fillText(`${area?.name || 'World'}`, 10, row1Y);
-    ctx.fillStyle = '#FF5555';
-    ctx.fillText(`LIFE ${String((hud.life*100)|0).padStart(3,' ')}%`, 160, row1Y);
-    ctx.fillStyle = '#A0FF64';
-    ctx.fillText(`HUNGER ${String(Math.round(hud.hunger*100)).padStart(3,' ')}%`, 300, row1Y);
-    ctx.textAlign = 'right';
+    ctx.fillText(areaName, badgeX + badgePad, badgeY + 16);
+
+    // ── Stat bars (Life, Hunger, Points) ──
+    const drawStatBar = (x, y, iconImg, label, value, maxVal, barColor, textColor) => {
+      const barW = 100, barFullH = 12, iconSz = 18, radius = 3;
+      // Icon
+      if (iconImg && iconImg.width > 0) {
+        ctx.drawImage(iconImg, x, y, iconSz, iconSz);
+      }
+      const bx = x + iconSz + 6;
+      const by = y + 3;
+      // Bar background with rounded rect
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+      ctx.beginPath();
+      ctx.moveTo(bx + radius, by); ctx.lineTo(bx + barW - radius, by);
+      ctx.quadraticCurveTo(bx + barW, by, bx + barW, by + radius);
+      ctx.lineTo(bx + barW, by + barFullH - radius);
+      ctx.quadraticCurveTo(bx + barW, by + barFullH, bx + barW - radius, by + barFullH);
+      ctx.lineTo(bx + radius, by + barFullH);
+      ctx.quadraticCurveTo(bx, by + barFullH, bx, by + barFullH - radius);
+      ctx.lineTo(bx, by + radius);
+      ctx.quadraticCurveTo(bx, by, bx + radius, by);
+      ctx.fill();
+      // Bar fill with gradient
+      const fillRatio = Math.max(0, Math.min(1, value / maxVal));
+      const fillW = barW * fillRatio;
+      if (fillW > 0) {
+        const barGrad = ctx.createLinearGradient(bx, 0, bx + barW, 0);
+        barGrad.addColorStop(0, barColor);
+        barGrad.addColorStop(1, barColor.replace(')', ', 0.7)').replace('rgb', 'rgba'));
+        ctx.fillStyle = barGrad;
+        ctx.beginPath();
+        const fr = Math.min(radius, fillW);
+        ctx.moveTo(bx + fr, by); ctx.lineTo(bx + fillW - (fillW >= barW ? radius : 0), by);
+        if (fillW >= barW) ctx.quadraticCurveTo(bx + fillW, by, bx + fillW, by + radius); else ctx.lineTo(bx + fillW, by);
+        ctx.lineTo(bx + fillW, by + barFullH - (fillW >= barW ? radius : 0));
+        if (fillW >= barW) ctx.quadraticCurveTo(bx + fillW, by + barFullH, bx + fillW - radius, by + barFullH); else ctx.lineTo(bx + fillW, by + barFullH);
+        ctx.lineTo(bx + fr, by + barFullH);
+        ctx.quadraticCurveTo(bx, by + barFullH, bx, by + barFullH - radius);
+        ctx.lineTo(bx, by + radius);
+        ctx.quadraticCurveTo(bx, by, bx + fr, by);
+        ctx.fill();
+        // Shine on top edge
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+        ctx.fillRect(bx + 2, by + 1, fillW - 4, 2);
+      }
+      // Bar subtle border
+      ctx.strokeStyle = 'rgba(200, 180, 140, 0.35)';
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(bx + radius, by); ctx.lineTo(bx + barW - radius, by);
+      ctx.quadraticCurveTo(bx + barW, by, bx + barW, by + radius);
+      ctx.lineTo(bx + barW, by + barFullH - radius);
+      ctx.quadraticCurveTo(bx + barW, by + barFullH, bx + barW - radius, by + barFullH);
+      ctx.lineTo(bx + radius, by + barFullH);
+      ctx.quadraticCurveTo(bx, by + barFullH, bx, by + barFullH - radius);
+      ctx.lineTo(bx, by + radius);
+      ctx.quadraticCurveTo(bx, by, bx + radius, by);
+      ctx.stroke();
+      // Label + value
+      ctx.fillStyle = textColor;
+      ctx.font = 'bold 11px "Segoe UI", Arial, sans-serif';
+      ctx.textAlign = 'start';
+      ctx.fillText(`${label} ${Math.round(value * 100)}%`, bx + 4, by + barFullH - 2);
+    };
+
+    // Life bar
+    const statStartX = badgeX + badgeW + 20;
+    drawStatBar(statStartX, 6, assets.uiHeart, 'HP', hud.life, 1,
+      hud.life > 0.5 ? 'rgb(80, 210, 80)' : hud.life > 0.25 ? 'rgb(230, 180, 40)' : 'rgb(220, 50, 50)', '#fff');
+
+    // Hunger bar
+    const hungerX = statStartX + 148;
+    drawStatBar(hungerX, 6, assets.uiEnergy, 'HGR', hud.hunger, 1,
+      'rgb(100, 180, 255)', '#fff');
+
+    // Points (gold counter)
+    const ptsX = hungerX + 148;
+    if (assets.uiCoin && assets.uiCoin.width > 0) {
+      ctx.drawImage(assets.uiCoin, ptsX, 6, 18, 18);
+    } else {
+      ctx.fillStyle = '#FFD700';
+      ctx.beginPath(); ctx.arc(ptsX + 9, 15, 8, 0, Math.PI * 2); ctx.fill();
+    }
     ctx.fillStyle = '#FFD700';
-    ctx.fillText(`PTS ${playerStats.points.toFixed(4)}`, canvas.width - 10, row1Y);
-    // Row 2: controls
+    ctx.font = 'bold 14px "Segoe UI", Arial, sans-serif';
     ctx.textAlign = 'start';
-    ctx.fillStyle = '#9ad1ff';
-      ctx.font = 'bold 11px monospace';
-    ctx.fillText('WASD Move | J Attack | K Defend | L Roll | E Talk | F Eat | I Inventory | B Build', 10, row2Y);
+    ctx.fillText(`${playerStats.points.toFixed(2)} PTS`, ptsX + 24, 20);
+
+    // ── Controls hint (row 2) ── clean anti-aliased text
+    ctx.fillStyle = 'rgba(190, 180, 160, 0.65)';
+    ctx.font = '11px "Segoe UI", Arial, sans-serif';
+    ctx.textAlign = 'start';
+    ctx.fillText('WASD Move  |  J Attack  |  K Defend  |  L Roll  |  E Talk  |  F Eat  |  I Inventory  |  B Build', 14, barH - 7);
+
+    // ── Top-right circular navigator minimap (cached) ──
+    const mw = motherWorldRef.current;
+    const mapTiles = mw?.tiles;
+    const mapH = mapTiles?.length || 0;
+    const mapW = mapH ? (mapTiles[0]?.length || 0) : 0;
+    if (mapW > 0 && mapH > 0) {
+      const radius = 62;
+      const centerX = W - radius - 14;
+      const centerY = radius + 10;
+      const size = radius * 2;
+      const mc = minimapCacheRef.current;
+
+      // Build offscreen minimap terrain once, then reuse
+      if (!mc.canvas || mc.mapW !== mapW || mc.mapH !== mapH) {
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = size;
+        offCanvas.height = size;
+        const offCtx = offCanvas.getContext('2d');
+        offCtx.fillStyle = '#0a1620';
+        offCtx.fillRect(0, 0, size, size);
+        const sampleCols = 48;
+        const sampleRows = 48;
+        const cellW = size / sampleCols;
+        const cellH = size / sampleRows;
+        for (let sy = 0; sy < sampleRows; sy++) {
+          const ty = Math.min(mapH - 1, Math.floor((sy / sampleRows) * mapH));
+          for (let sx = 0; sx < sampleCols; sx++) {
+            const tx = Math.min(mapW - 1, Math.floor((sx / sampleCols) * mapW));
+            const t = mapTiles[ty][tx] ?? 0;
+            if (t === 3) offCtx.fillStyle = '#3a8c44';
+            else if (t === 1 || t === 28) offCtx.fillStyle = '#8d6840';
+            else if (t === 25 || t === 5) offCtx.fillStyle = '#6e6e78';
+            else if (t === 27) offCtx.fillStyle = '#2a7834';
+            else if (t === 6 || t === 7 || t === 26) offCtx.fillStyle = '#1e3f5a';
+            else if (t === 2) offCtx.fillStyle = '#c4a868';
+            else if (t === 0) offCtx.fillStyle = '#0c1a28';
+            else offCtx.fillStyle = '#3a8c44';
+            offCtx.fillRect(sx * cellW, sy * cellH, Math.ceil(cellW) + 1, Math.ceil(cellH) + 1);
+          }
+        }
+        mc.canvas = offCanvas;
+        mc.mapW = mapW;
+        mc.mapH = mapH;
+      }
+
+      ctx.save();
+      // Outer glow
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+      ctx.shadowBlur = 10;
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, radius + 2, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Clip to circle
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+      ctx.closePath();
+      ctx.clip();
+
+      // Draw cached terrain
+      ctx.drawImage(mc.canvas, centerX - radius, centerY - radius, size, size);
+
+      // Player location marker with pulse
+      const player = gameWorldState.current.player;
+      const worldWpx = mapW * 8;
+      const worldHpx = mapH * 8;
+      const px = centerX - radius + (Math.max(0, Math.min(worldWpx, player.x)) / worldWpx) * size;
+      const py = centerY - radius + (Math.max(0, Math.min(worldHpx, player.y)) / worldHpx) * size;
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.004);
+      ctx.beginPath();
+      ctx.arc(px, py, 4 + pulse * 3, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255, 77, 109, ${0.15 + pulse * 0.15})`;
+      ctx.fill();
+      ctx.fillStyle = '#ff4d6d';
+      ctx.beginPath();
+      ctx.arc(px, py, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.restore();
+
+      // Ring border
+      ctx.strokeStyle = 'rgba(180, 150, 90, 0.7)';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(120, 100, 60, 0.4)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, radius + 3, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // "MAP" label
+      ctx.fillStyle = 'rgba(12, 8, 4, 0.7)';
+      ctx.fillRect(centerX - 18, centerY + radius + 5, 36, 14);
+      ctx.fillStyle = '#d4b870';
+      ctx.font = 'bold 10px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('MAP', centerX, centerY + radius + 15);
+      ctx.textAlign = 'start';
+    }
   };
 
   // Game loop
   // Frame throttle to reduce CPU/GPU load
-  const targetFps = 50;
+  const targetFps = 30;
   const frameIntervalMs = 1000 / targetFps;
   const lastFrameTimeRef = useRef(0);
 
@@ -2391,13 +3378,25 @@ function App() {
     minutesPlayedRef.current += dt / 60;
     seasonSystemRef.current.tick(dt);
     energySystemRef.current.tick(dt, seasonSystemRef.current.modifiers(), false);
+
+    // Tick dialogue and tutorial every frame
+    dialogueManager.current.tick();
+    if (dialogueManager.current.isActive()) {
+      setDialogueData(dialogueManager.current.getCurrent());
+    }
+    tutorialManager.current.tick();
+    setTutorialStep(tutorialManager.current.getCurrentStep());
+
     const s = seasonSystemRef.current.get();
     const now = performance.now();
     if (now - lastUIUpdateRef.current > 50) {
       lastUIUpdateRef.current = now;
       setSeasonUI({ season: s, progress: seasonSystemRef.current.progress() });
       const energy = energySystemRef.current.state();
-      setHud(prev => ({ ...prev, hunger: energy.hunger, life: energy.life, xp: karmaSystemRef.current.get().xp, karma: karmaSystemRef.current.get().karma }));
+      // Sync combat health into HUD: player.health (0-100) → life (0-1)
+      const combatLife = (gameWorldState.current.player?.health ?? 100) / (gameWorldState.current.player?.maxHealth ?? 100);
+      const effectiveLife = Math.min(energy.life, combatLife); // whichever is lower
+      setHud(prev => ({ ...prev, hunger: energy.hunger, life: effectiveLife, xp: karmaSystemRef.current.get().xp, karma: karmaSystemRef.current.get().karma }));
       setHint(guideHint({
         energy,
         season: s,
@@ -2423,7 +3422,7 @@ function App() {
     setHazards((list) => list.map(h => ({ ...h, ttl: h.ttl - dt })).filter(h => h.ttl > 0));
 
     // Update day/night cycle - only when not paused
-    if (gameState === 'playing') {
+    if (gameStateRef.current === 'playing') {
       const transition = dayNightCycle.current.update();
       setTimeOfDay(dayNightCycle.current.getTimeString());
       setIsNight(dayNightCycle.current.isNight);
@@ -2468,8 +3467,6 @@ function App() {
   const initGame = async () => {
     try {
       initAudio();
-      initTreasures();
-      initEnemies();
       
       // Initialize music manager
       await musicManager.current.initialize();
@@ -2495,11 +3492,44 @@ function App() {
         setShowModal(true);
         return; // Abort init until a valid map is provided
       }
-      // place player at spawn of starting area
+      initTreasures();
+      initEnemies();
+      // place player at saved position if available, otherwise spawn
       const spawn = motherWorldRef.current?.spawn || { x: 512, y: 600 };
-      if (spawn) {
-        gameWorldState.current.player.x = spawn.x;
-        gameWorldState.current.player.y = spawn.y;
+      const saved = loadPlayerProgress();
+      const worldWpx = (motherWorldRef.current?.width || 200) * 8;
+      const worldHpx = (motherWorldRef.current?.height || 150) * 8;
+      const player = gameWorldState.current.player;
+      let startPos = spawn;
+      if (saved && saved.x >= 0 && saved.x <= worldWpx && saved.y >= 0 && saved.y <= worldHpx) {
+        // Validate saved position is actually walkable
+        if (isPositionWalkable(saved.x, saved.y)) {
+          startPos = { x: saved.x, y: saved.y };
+          gameWorldState.current.camera.x = Math.max(0, saved.cameraX || 0);
+          gameWorldState.current.camera.y = Math.max(0, saved.cameraY || 0);
+          // Restore game stats if saved
+          if (saved.stats) {
+            setGameStats(prev => ({ ...prev, ...saved.stats }));
+          }
+          if (saved.points && gamePoints) {
+            Object.assign(gamePoints, saved.points);
+          }
+          console.log('📂 Loaded saved progress at', startPos);
+        } else {
+          // Saved position is blocked — find safe nearby spot
+          startPos = findNearestSafePosition(saved.x, saved.y);
+          console.log('⚠️ Saved position blocked, moved to safe spot', startPos);
+        }
+      }
+      // Ensure start position is walkable
+      if (!isPositionWalkable(startPos.x, startPos.y)) {
+        startPos = findNearestSafePosition(startPos.x, startPos.y);
+      }
+      player.x = startPos.x;
+      player.y = startPos.y;
+      if (!saved || !isPositionWalkable(saved?.x, saved?.y)) {
+        gameWorldState.current.camera.x = Math.max(0, startPos.x - 260);
+        gameWorldState.current.camera.y = Math.max(0, startPos.y - 180);
       }
       
       // Start title music after a brief delay; also retry once if AudioContext was suspended
@@ -2530,8 +3560,17 @@ function App() {
     gameWorldState.current.keys[key] = true;
     gameWorldState.current.keys[code] = true;
     if (typeof key === 'string') gameWorldState.current.keys[key.toLowerCase()] = true;
-    const isGameKey = ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','a','A','d','D','w','W','s','S','e','E','f','F','r','R','Enter','Escape','j','J','k','K','l','L','i','I','b','B','m','M'].includes(e.key);
+    const isGameKey = ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','a','A','d','D','w','W','s','S','e','E','f','F','r','R','Enter','Escape','j','J','k','K','l','L','i','I','b','B','n','N','m','M',' ','1','2','3','4','5','6','7','8','9'].includes(e.key);
     if (isGameKey) e.preventDefault();
+
+    // ── Dialogue / Cutscene advance ──
+    if (dialogueManager.current.isActive()) {
+      if (key === 'Enter' || key === ' ' || key === 'Escape') {
+        const still = dialogueManager.current.advance();
+        setDialogueData(still ? dialogueManager.current.getCurrent() : null);
+      }
+      return; // block all other keys while dialogue is showing
+    }
     
     // Ensure audio context is resumed on first user interaction
     if (musicManager.current && musicManager.current.audioContext) {
@@ -2540,18 +3579,30 @@ function App() {
         musicManager.current.playTrack('title');
       }
     }
-    
-    // Debug: Log key presses to console (remove in production)
-    console.log(`🎮 Key pressed: ${e.key}, Code: ${e.code}, Game State: ${gameState}`);
-    
-    // Handle refresh key
-    if (e.key === 'r' || e.key === 'R') {
+
+    // Handle refresh key (only when not actively playing)
+    if ((e.key === 'r' || e.key === 'R') && gameStateRef.current !== 'playing') {
       forceRefreshUI();
-      console.log('UI refreshed manually');
+    }
+
+    if (e.key === '1') { stakeCoins(); }
+    if (e.key === '2') { claimRewards(); }
+    if (e.key === '3') { mintNFT(); }
+    if (e.key === '4') { showAccountBalance(); }
+    if (e.key === '5') { unstakeCoins(); }
+    if (e.key === '6') { mintCITTokens(10); }
+    if (e.key === '7') { stakeCITTokens(10); }
+    if (e.key === '8') { claimCITRewards(); }
+    if (e.key === '9') { unstakeCITTokens(); }
+
+    // ── Movement tutorial tracking ──
+    if (['w','a','s','d','W','A','S','D','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(key)) {
+      tutorialManager.current.complete('playerMoved');
     }
     
     // Combat controls
     if (e.key === 'j' || e.key === 'J') {
+      tutorialManager.current.complete('playerAttacked');
       // Attack with combo system
       const player = gameWorldState.current.player;
       const currentTime = Date.now();
@@ -2580,6 +3631,7 @@ function App() {
     }
     
     if (e.key === 'k' || e.key === 'K') {
+      tutorialManager.current.complete('playerDefended');
       // Defend/Crouch
       const player = gameWorldState.current.player;
       if (player.defendCooldown <= 0 && player.state !== 'death' && !player.isEating) {
@@ -2609,7 +3661,7 @@ function App() {
       }
     }
     
-    // Enhanced NPC interaction with dialogue trees
+    // Enhanced NPC interaction with dialogue system
     if (e.key === 'e' || e.key === 'E') {
       const player = gameWorldState.current.player;
       const currentArea = gameMap.areas[gameMap.currentArea];
@@ -2617,16 +3669,27 @@ function App() {
       (currentArea?.npcs || []).forEach(npc => {
         if (checkCollision(player, { x: npc.x, y: npc.y, width: 24, height: 32 })) {
           playSound('talk', 500, 0.2);
+          tutorialManager.current.complete('playerTalked');
           
-          // Enhanced dialogue with political themes
-          const dialogueIndex = Math.floor(Math.random() * npc.dialogueTree.length);
-          const selectedDialogue = npc.dialogueTree[dialogueIndex];
+          const npcName = npc.name || npc.type || 'Villager';
+          const npcType = (npc.type || 'villager').toLowerCase();
           
-          setModalContent(`${npc.name} (${npc.politicalAffiliation}): "${selectedDialogue}"`);
-          setShowModal(true);
-          setTimeout(() => setShowModal(false), 5000);
+          // Pick dialogue lines from the NPC_DIALOGUES map or fallback
+          const pool = NPC_DIALOGUES[npcType] || NPC_DIALOGUES.villager;
+          const dialogueTree = Array.isArray(npc.dialogueTree) && npc.dialogueTree.length
+            ? npc.dialogueTree : pool;
+          const line = dialogueTree[Math.floor(Math.random() * dialogueTree.length)];
           
-          // Give bonus points for political interactions
+          // Start a mini-cutscene with a single line
+          dialogueManager.current.startCutscene([{
+            speaker: npcName,
+            portrait: 'npc',
+            text: line,
+            bg: 'dark',
+          }], () => { setDialogueData(null); });
+          setDialogueData(dialogueManager.current.getCurrent());
+          
+          // Give bonus points
           setPlayerStats(prev => ({
             ...prev,
             points: prev.points + 50,
@@ -2641,29 +3704,35 @@ function App() {
       const player = gameWorldState.current.player;
       if (player.health < player.maxHealth && !player.isEating && player.state === 'idle') {
         player.isEating = true;
-        player.eatTimer = 60; // 1 second at 60fps
-        player.state = 'defend'; // Use crouch animation for eating
+        player.eatTimer = 60;
+        player.state = 'defend';
         playSound('heal', 600, 0.3);
       }
     }
     
     // Inventory controls
     if (e.key === 'i' || e.key === 'I') {
-      setShowInventory(!showInventory);
+      setShowInventory(prev => !prev);
+      tutorialManager.current.complete('inventoryOpened');
     }
     
     // Building menu
     if (e.key === 'b' || e.key === 'B') {
-      setShowBuildMenu(!showBuildMenu);
+      setShowBuildMenu(prev => !prev);
+    }
+
+    if (e.key === 'n' || e.key === 'N') {
+      setShowWorldMap(prev => !prev);
+      tutorialManager.current.complete('mapOpened');
     }
     
     // Handle Escape key for pause/navigation
     if (e.key === 'Escape') {
-      if (gameState === 'playing') {
-        setGameState('paused');
+      if (gameStateRef.current === 'playing') {
+        setScreenState('paused');
         console.log('Game paused');
-      } else if (gameState === 'paused') {
-        setGameState('playing');
+      } else if (gameStateRef.current === 'paused') {
+        setScreenState('playing');
         console.log('Game resumed');
       } else {
         setBuildingMode(false);
@@ -2673,8 +3742,8 @@ function App() {
     
     // Quit to menu when paused
     if (e.key === 'q' || e.key === 'Q') {
-      if (gameState === 'paused') {
-        setGameState('title');
+      if (gameStateRef.current === 'paused') {
+        setScreenState('title');
         screenManager.current.currentScreen = 'title';
         musicManager.current.playTrack('title');
         console.log('Quit to main menu');
@@ -2683,8 +3752,8 @@ function App() {
     
     // Restart game when paused
     if (e.key === 'r' || e.key === 'R') {
-      if (gameState === 'paused') {
-        setGameState('playing');
+      if (gameStateRef.current === 'paused') {
+        setScreenState('playing');
         resetGame();
         console.log('Game restarted');
       }
@@ -2693,14 +3762,7 @@ function App() {
     // Music controls
     if (e.key === 'm' || e.key === 'M') {
       // Toggle music
-      if (musicManager.current.isPlaying) {
-        musicManager.current.stopCurrentTrack();
-      } else {
-        const track = gameState === 'title' ? 'title' : 
-                     gameState === 'playing' ? (isNight ? 'gameplay_night' : 'gameplay_day') : 
-                     'title';
-        musicManager.current.playTrack(track);
-      }
+      toggleMusicPlayback();
     }
     
     if (e.key === '=' || e.key === '+') {
@@ -2792,10 +3854,14 @@ function App() {
           return;
         }
         
-        // Support both Hardhat (31337) and Avalanche Local (1337)
+        // Fuji testnet only
         const CHAINS = [
-          { id: '0x7A69', name: 'Hardhat Local', rpc: 'http://127.0.0.1:8545', currency: { name: 'ETH', symbol: 'ETH', decimals: 18 } },
-          { id: '0x539',  name: 'Avalanche Local', rpc: 'http://127.0.0.1:9650/ext/bc/C/rpc', currency: { name: 'AVAX', symbol: 'AVAX', decimals: 18 } },
+          {
+            id: '0xA869',
+            name: 'Avalanche Fuji Testnet',
+            rpc: 'https://api.avax-test.network/ext/bc/C/rpc',
+            currency: { name: 'AVAX', symbol: 'AVAX', decimals: 18 }
+          },
         ];
 
         const trySwitchOrAdd = async (chain) => {
@@ -2814,19 +3880,16 @@ function App() {
           }
         };
 
-        // If already on a supported chain, keep it; else prefer Hardhat, then Avalanche Local
+        // If already on Fuji, keep it; otherwise switch/add Fuji
         const currentChain = await provider.request({ method: 'eth_chainId' }).catch(() => null);
         const isSupported = CHAINS.some(c => c.id === currentChain);
         if (!isSupported) {
-          const okHardhat = await trySwitchOrAdd(CHAINS[0]);
-          if (!okHardhat) {
-            const okAvalanche = await trySwitchOrAdd(CHAINS[1]);
-            if (!okAvalanche) {
-              setModalContent('Please add Hardhat (31337) or Avalanche Local (1337) network in MetaMask.');
-              setShowModal(true);
-              setTimeout(() => setShowModal(false), 5000);
-              return;
-            }
+          const okFuji = await trySwitchOrAdd(CHAINS[0]);
+          if (!okFuji) {
+            setModalContent('Please add Avalanche Fuji Testnet (43113) in MetaMask.');
+            setShowModal(true);
+            setTimeout(() => setShowModal(false), 5000);
+            return;
           }
         }
         
@@ -2854,7 +3917,7 @@ function App() {
         // Get account balance using contract service
         const balance = await contractService.getAccountBalance(accounts[0]);
         
-        setModalContent(`✅ Connected to Avalanche Local Network!\nAddress: ${accounts[0].slice(0, 6)}...${accounts[0].slice(-4)}\nBalance: ${balance} AVAX\n\n🎮 Ready for local blockchain transactions!`);
+        setModalContent(`✅ Connected to Avalanche Fuji Testnet!\nAddress: ${accounts[0].slice(0, 6)}...${accounts[0].slice(-4)}\nBalance: ${balance} AVAX\n\n🎮 Ready for testnet blockchain transactions!`);
         setShowModal(true);
         setTimeout(() => setShowModal(false), 5000);
         
@@ -3126,6 +4189,7 @@ function App() {
       
       if (receipt.status === 1) {
         playSound('stake', 300, 0.2);
+        setWeb3Quest(prev => ({ ...prev, stake: true }));
         setPlayerStats(prev => ({
           ...prev,
           energy: Math.min(100, prev.energy + 20),
@@ -3142,7 +4206,9 @@ function App() {
         // Update leaderboard with AVAX points
         await updateLeaderboard(address, 0.01); // 0.01 AVAX points for staking
         
-        setModalContent(`✅ Staked 0.01 AVAX successfully!\nTX: ${tx.hash}\nContract: ${contractService.stakingContract.address}\nEnergy +20, Streak +1, AVAX Points +0.01`);
+        pushTx(tx.hash, 'AVAX Stake', '0.01 AVAX');
+        await refreshBlockchainState();
+        setModalContent(`✅ Staked 0.01 AVAX!\nTX: ${tx.hash}\n🔗 https://testnet.snowtrace.io/tx/${tx.hash}`);
         setShowModal(true);
         setTimeout(() => setShowModal(false), 5000);
       } else {
@@ -3189,7 +4255,9 @@ function App() {
           streak: prev.streak + 1
         }));
         
-        setModalContent(`✅ Unstaked successfully!\nTX: ${tx.hash}\nContract: ${contractService.stakingContract.address}\nEnergy +10, Streak +1`);
+        pushTx(tx.hash, 'AVAX Unstake', 'All staked AVAX');
+        await refreshBlockchainState();
+        setModalContent(`✅ Unstaked!\nTX: ${tx.hash}\n🔗 https://testnet.snowtrace.io/tx/${tx.hash}`);
         setShowModal(true);
         setTimeout(() => setShowModal(false), 5000);
       } else {
@@ -3230,13 +4298,16 @@ function App() {
       
       if (receipt.status === 1) {
         playSound('collect', 600, 0.2);
+        setWeb3Quest(prev => ({ ...prev, rewards: true }));
         setPlayerStats(prev => ({
           ...prev,
           points: prev.points + 200,
           streak: prev.streak + 1
         }));
         
-        setModalContent(`✅ Rewards claimed successfully!\nTX: ${tx.hash}\nContract: ${contractService.stakingContract.address}\n+200 Points, Streak +1`);
+        pushTx(tx.hash, 'Claim Rewards', 'Staking Rewards');
+        await refreshBlockchainState();
+        setModalContent(`✅ Rewards claimed!\nTX: ${tx.hash}\n🔗 https://testnet.snowtrace.io/tx/${tx.hash}`);
         setShowModal(true);
         setTimeout(() => setShowModal(false), 5000);
       } else {
@@ -3248,6 +4319,249 @@ function App() {
     } catch (error) {
       console.error('Claim rewards error:', error);
       setModalContent(`Claim rewards failed: ${error.message}`);
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 4000);
+    }
+  };
+
+  const mintCITTokens = async (amount = 10) => {
+    if (!isConnected || !contractService.isInitialized()) {
+      setModalContent('Please connect your wallet first!');
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 3000);
+      return;
+    }
+
+    try {
+      setModalContent(`Minting ${amount} CIT tokens... Please confirm in MetaMask.`);
+      setShowModal(true);
+      const tx = await contractService.mintTokensWithAVAX(amount);
+      const receipt = await tx.wait();
+      if (receipt.status === 1) {
+        pushTx(tx.hash, 'Mint CIT', `${amount} CIT`);
+        setWeb3Quest(prev => ({ ...prev, cit: true }));
+        await refreshBlockchainState();
+        setModalContent(`✅ Minted ${amount} CIT!\nTX: ${tx.hash}\n🔗 https://testnet.snowtrace.io/tx/${tx.hash}`);
+      } else {
+        setModalContent('CIT mint transaction failed on-chain.');
+      }
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 5000);
+    } catch (error) {
+      setModalContent(`CIT mint failed: ${error.message}`);
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 4000);
+    }
+  };
+
+  const stakeCITTokens = async (amount = 10) => {
+    if (!isConnected || !contractService.isInitialized()) {
+      setModalContent('Please connect your wallet first!');
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 3000);
+      return;
+    }
+
+    try {
+      setModalContent(`Staking ${amount} CIT... Please confirm in MetaMask.`);
+      setShowModal(true);
+      const tx = await contractService.stakeTokens(amount);
+      const receipt = await tx.wait();
+      if (receipt.status === 1) {
+        pushTx(tx.hash, 'Stake CIT', `${amount} CIT`);
+        await refreshBlockchainState();
+        setModalContent(`✅ Staked ${amount} CIT!\nTX: ${tx.hash}\n🔗 https://testnet.snowtrace.io/tx/${tx.hash}`);
+      } else {
+        setModalContent('CIT stake failed on-chain.');
+      }
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 5000);
+    } catch (error) {
+      setModalContent(`CIT staking failed: ${error.message}`);
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 4000);
+    }
+  };
+
+  const claimCITRewards = async () => {
+    if (!isConnected || !contractService.isInitialized()) {
+      setModalContent('Please connect your wallet first!');
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 3000);
+      return;
+    }
+
+    try {
+      setModalContent('Claiming CIT staking rewards... Please confirm in MetaMask.');
+      setShowModal(true);
+      const tx = await contractService.claimTokenRewards();
+      const receipt = await tx.wait();
+      if (receipt.status === 1) {
+        pushTx(tx.hash, 'Claim CIT Rewards', 'CIT Staking Rewards');
+        await refreshBlockchainState();
+        setModalContent(`✅ CIT rewards claimed!\nTX: ${tx.hash}\n🔗 https://testnet.snowtrace.io/tx/${tx.hash}`);
+      } else {
+        setModalContent('CIT reward claim failed on-chain.');
+      }
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 5000);
+    } catch (error) {
+      setModalContent(`CIT reward claim failed: ${error.message}`);
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 4000);
+    }
+  };
+
+  const unstakeCITTokens = async () => {
+    if (!isConnected || !contractService.isInitialized()) {
+      setModalContent('Please connect your wallet first!');
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 3000);
+      return;
+    }
+
+    try {
+      setModalContent('Unstaking CIT... Please confirm in MetaMask.');
+      setShowModal(true);
+      const tx = await contractService.unstakeTokens();
+      const receipt = await tx.wait();
+      if (receipt.status === 1) {
+        pushTx(tx.hash, 'Unstake CIT', 'All staked CIT');
+        await refreshBlockchainState();
+        setModalContent(`✅ CIT unstaked!\nTX: ${tx.hash}\n🔗 https://testnet.snowtrace.io/tx/${tx.hash}`);
+      } else {
+        setModalContent('CIT unstake failed on-chain.');
+      }
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 5000);
+    } catch (error) {
+      setModalContent(`CIT unstake failed: ${error.message}`);
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 4000);
+    }
+  };
+
+  // ── Helper: push a transaction into history ──
+  const pushTx = (hash, type, amount, status = 'confirmed') => {
+    setTxHistory(prev => [{ hash, type, amount, timestamp: Date.now(), status }, ...prev].slice(0, 30));
+  };
+
+  // ── Refresh all on-chain balances (AVAX, CIT, NFT, staker info) ──
+  const refreshBlockchainState = async () => {
+    if (!isConnected || !contractService.isInitialized()) return;
+    try {
+      const address = await contractService.getCurrentAddress();
+      const [avaxBal, citBal, nfts] = await Promise.all([
+        contractService.getAccountBalance(address),
+        contractService.getTokenBalance(address).catch(() => '0'),
+        contractService.getNFTBalance(address).catch(() => 0)
+      ]);
+      setAvaxBalance(avaxBal);
+      setCitBalance(citBal);
+      setNftCount(nfts);
+
+      // CIT staker info
+      const si = await contractService.getTokenStakerInfo(address).catch(() => null);
+      setCitStakerInfo(si);
+
+      // AVAX staker info (includes tier, APY, multiplier)
+      const avaxSi = await contractService.getStakerInfo(address).catch(() => null);
+      setAvaxStakerInfo(avaxSi);
+    } catch (e) {
+      console.warn('refreshBlockchainState:', e);
+    }
+  };
+
+  // ── Exchange in-game gold → CIT tokens (real on-chain mint) ──
+  const exchangeGoldForCIT = async (goldAmount) => {
+    if (!isConnected || !contractService.isInitialized()) {
+      setModalContent('Connect your wallet first to exchange gold for CIT tokens!');
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 3000);
+      return;
+    }
+    const citAmount = Math.floor(goldAmount / EXCHANGE_RATE);
+    if (citAmount <= 0) {
+      setModalContent(`You need at least ${EXCHANGE_RATE} gold to exchange for 1 CIT token.\nYou have: ${gameStats.goldCollected} gold.`);
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 4000);
+      return;
+    }
+    const avaxCost = (citAmount * 0.001).toFixed(4);
+    try {
+      setBlockchainLoading('Exchanging gold for CIT...');
+      setModalContent(`🔄 Exchanging ${goldAmount} gold → ${citAmount} CIT\nAVAX cost: ${avaxCost}\nPlease confirm in MetaMask...`);
+      setShowModal(true);
+      const tx = await contractService.mintTokensWithAVAX(citAmount);
+      setModalContent(`⏳ TX sent: ${tx.hash.slice(0,10)}...\nWaiting for confirmation...`);
+      const receipt = await tx.wait();
+      if (receipt.status === 1) {
+        pushTx(tx.hash, 'Gold→CIT Exchange', `${goldAmount} gold → ${citAmount} CIT`);
+        setGameStats(prev => ({ ...prev, goldCollected: Math.max(0, prev.goldCollected - goldAmount) }));
+        setWeb3Quest(prev => ({ ...prev, cit: true }));
+        playSound('collect', 600, 0.3);
+        await refreshBlockchainState();
+        setModalContent(`✅ Exchanged ${goldAmount} gold for ${citAmount} CIT!\nTX: ${tx.hash}\n\n🔗 View: https://testnet.snowtrace.io/tx/${tx.hash}`);
+      } else {
+        setModalContent('❌ Exchange transaction failed on-chain.');
+      }
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 6000);
+    } catch (error) {
+      setModalContent(`Exchange failed: ${error.message}`);
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 4000);
+    } finally {
+      setBlockchainLoading('');
+    }
+  };
+
+  // ── Mint Achievement NFT (triggered by game milestones) ──
+  const mintAchievementNFT = async (reason) => {
+    if (!isConnected || !contractService.isInitialized()) {
+      setModalContent('Connect wallet to mint your achievement NFT!');
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 3000);
+      return;
+    }
+    try {
+      setBlockchainLoading('Minting achievement NFT...');
+      setModalContent(`🎨 Minting Achievement NFT\nReason: ${reason}\nPlease confirm in MetaMask...`);
+      setShowModal(true);
+      const tx = await contractService.mintNFT();
+      setModalContent(`⏳ TX sent: ${tx.hash.slice(0,10)}...\nWaiting for confirmation...`);
+      const receipt = await tx.wait();
+      if (receipt.status === 1) {
+        pushTx(tx.hash, 'Achievement NFT', reason);
+        setWeb3Quest(prev => ({ ...prev, nft: true }));
+        playSound('mint', 500, 0.3);
+        await refreshBlockchainState();
+        setModalContent(`✅ Achievement NFT Minted!\n🏆 ${reason}\nTX: ${tx.hash}\n\n🔗 View: https://testnet.snowtrace.io/tx/${tx.hash}`);
+      } else {
+        setModalContent('❌ NFT minting failed on-chain.');
+      }
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 6000);
+    } catch (error) {
+      setModalContent(`NFT mint failed: ${error.message}`);
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 4000);
+    } finally {
+      setBlockchainLoading('');
+    }
+  };
+
+  // ── Notify player of milestone when threshold crossed ──
+  const checkGameMilestones = (kills, gold, treasures) => {
+    // NFT milestone every KILL_REWARD_THRESHOLD kills
+    if (kills > 0 && kills % KILL_REWARD_THRESHOLD === 0) {
+      setModalContent(`🏆 Milestone: ${kills} enemies defeated!\nPress the ⛓ Web3 panel to mint your Achievement NFT!`);
+      setShowModal(true);
+      setTimeout(() => setShowModal(false), 5000);
+    }
+    // Gold exchange reminder every 100 gold
+    if (gold > 0 && gold % 100 === 0 && gold >= EXCHANGE_RATE) {
+      setModalContent(`💰 You have ${gold} gold!\nExchange it for CIT tokens in the ⛓ Web3 panel!`);
       setShowModal(true);
       setTimeout(() => setShowModal(false), 4000);
     }
@@ -3290,6 +4604,7 @@ function App() {
       
       if (receipt.status === 1) {
         playSound('mint', 500, 0.3);
+        setWeb3Quest(prev => ({ ...prev, nft: true }));
         setPlayerStats(prev => ({
           ...prev,
           points: prev.points + 0.005, // Add AVAX points
@@ -3304,7 +4619,9 @@ function App() {
         // Update leaderboard with AVAX points
         await updateLeaderboard(address, 0.005); // 0.005 AVAX points for minting NFT
         
-        setModalContent(`✅ NFT Minted successfully!\nTX: ${tx.hash}\nContract: ${contractService.nftContract.address}\n+0.005 AVAX Points, +0.0005 AVAX`);
+        pushTx(tx.hash, 'Mint NFT', '1 NFT (0.0005 AVAX)');
+        await refreshBlockchainState();
+        setModalContent(`✅ NFT Minted!\nTX: ${tx.hash}\n🔗 https://testnet.snowtrace.io/tx/${tx.hash}`);
         setShowModal(true);
         setTimeout(() => setShowModal(false), 5000);
       } else {
@@ -3321,50 +4638,9 @@ function App() {
     }
   };
 
-  // Check wallet connection status on app load
-  const checkWalletConnection = async () => {
-    try {
-      if (typeof window.ethereum !== 'undefined') {
-        const provider = window.ethereum;
-        const accounts = await provider.request({ method: 'eth_accounts' });
-        
-        if (accounts.length > 0) {
-          // Wallet is connected, initialize contract service
-          await contractService.initialize();
-          const balance = await contractService.getAccountBalance(accounts[0]);
-          setIsConnected(true);
-          setPlayerStats(prev => ({
-            ...prev,
-            avax: parseFloat(balance)
-          }));
-          
-          // Check if we're on the correct network
-          const chainId = await provider.request({ method: 'eth_chainId' });
-          // Accept both Hardhat (0x7A69) and Avalanche Local (0x539)
-          if (chainId !== '0x7A69' && chainId !== '0x539') {
-            try {
-              await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x7A69' }] });
-            } catch (_) {
-              try {
-                await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x539' }] });
-              } catch (__) {
-                // leave as-is; UI will prompt
-              }
-            }
-          }
-        }
-      }
-    } catch (error) {
-      console.log('Wallet not connected:', error);
-    }
-  };
-
   useEffect(() => {
     if (canvasRef.current) {
       initGame();
-      
-      // Check wallet connection on app load
-      checkWalletConnection();
       
       // Focus the canvas for keyboard input
       canvasRef.current.focus();
@@ -3405,6 +4681,19 @@ function App() {
     }
   }, []);
 
+  useEffect(() => {
+    const flushProgress = () => savePlayerProgress(true);
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flushProgress();
+    };
+    window.addEventListener('beforeunload', flushProgress);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('beforeunload', flushProgress);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
+
   // Auto-update real-time stats when player stats change
   useEffect(() => {
     updateRealtimeStatsImmediately();
@@ -3429,7 +4718,8 @@ function App() {
 
   // Handle MetaMask account changes and disconnections
   useEffect(() => {
-    if (typeof window.ethereum !== 'undefined') {
+    const provider = blockchainManager.current?.ethereumProvider || window.ethereum;
+    if (provider && typeof provider.on === 'function') {
       const handleAccountsChanged = (accounts) => {
         if (accounts.length === 0) {
           // User disconnected
@@ -3445,30 +4735,45 @@ function App() {
       };
 
       const handleChainChanged = (chainId) => {
-        const ok = chainId === '0x7A69' || chainId === '0x539';
+        const ok = chainId === '0xA869';
         if (!ok) {
-          setModalContent('Please switch to Hardhat (31337) or Avalanche Local (1337).');
+          setModalContent('Please switch to Avalanche Fuji Testnet (43113).');
           setShowModal(true);
           setTimeout(() => setShowModal(false), 5000);
         }
       };
 
       // Add event listeners
-      window.ethereum.on('accountsChanged', handleAccountsChanged);
-      window.ethereum.on('chainChanged', handleChainChanged);
+      provider.on('accountsChanged', handleAccountsChanged);
+      provider.on('chainChanged', handleChainChanged);
 
       // Cleanup
       return () => {
-        if (window.ethereum.removeListener) {
-          window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
-          window.ethereum.removeListener('chainChanged', handleChainChanged);
+        if (typeof provider.removeListener === 'function') {
+          provider.removeListener('accountsChanged', handleAccountsChanged);
+          provider.removeListener('chainChanged', handleChainChanged);
         }
       };
     }
   }, []);
 
+  const currentLevel = pointSystem.current?.getLevel?.() || 1;
+  const currentExp = gamePoints?.experience || 0;
+  const expBaseCurrentLevel = Math.max(0, (currentLevel - 1) * 1000);
+  const expNextLevelTotal = currentLevel * 1000;
+  const expIntoCurrentLevel = Math.max(0, currentExp - expBaseCurrentLevel);
+  const expNeededThisLevel = Math.max(1, expNextLevelTotal - expBaseCurrentLevel);
+  const levelProgressPercent = Math.min(100, Math.max(0, (expIntoCurrentLevel / expNeededThisLevel) * 100));
+
+  const activeArea = gameMap.areas[gameMap.currentArea];
+  const worldWidthPx = Math.max(1, (activeArea?.width || gameMap.width) * 8);
+  const worldHeightPx = Math.max(1, (activeArea?.height || gameMap.height) * 8);
+
   return (
     <div className="app">
+      <div className="bg-glow bg-glow-1" aria-hidden="true" />
+      <div className="bg-glow bg-glow-2" aria-hidden="true" />
+      <div className="bg-noise" aria-hidden="true" />
       
       <div className="game-container">
         <canvas
@@ -3481,57 +4786,70 @@ function App() {
         />
       </div>
       
-      {hint && (
-        <div className="hint-bubble">💡 {hint}</div>
+      {hint && !dialogueData && !showPrologue && (gameState === 'playing' || gameState === 'paused') && (
+        <div className="hint-bubble">{hint}</div>
       )}
       
-      {/* Click to focus instruction */}
+      {/* ── Title screen click-capture (invisible, full-screen) ── */}
       {gameState === 'title' && (
-        <div onClick={() => handleScreenAction('startGame')} role="button" aria-label="Start Game" style={{
-          position: 'absolute',
-          bottom: '20px',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          color: '#ffffff',
-          fontSize: '14px',
-          textAlign: 'center',
-          opacity: 0.8,
-          animation: 'pulse 2s infinite',
-          cursor: 'pointer',
-          userSelect: 'none',
-          zIndex: 1001
-        }}>
-          👆 Click game screen first, then press keys to play
-          <br />
-          🎮 ENTER to start | S for scoreboard | H for help | M for music
+        <div onClick={() => handleScreenAction('startGame')} role="button" aria-label="Start Game"
+          style={{position:'fixed',inset:0,zIndex:1001,cursor:'pointer'}} />
+      )}
+      
+      {/* ── Prologue / Cutscene Overlay ── */}
+      {showPrologue && dialogueData && (
+        <div className="cutscene-overlay" onClick={() => { const still = dialogueManager.current.advance(); setDialogueData(still ? dialogueManager.current.getCurrent() : null); }}>
+          <div className="cutscene-bg" style={{
+            background: dialogueData.bg === 'red'
+              ? 'radial-gradient(ellipse at center, rgba(120,10,10,0.9), rgba(10,0,0,0.95))'
+              : dialogueData.bg === 'gold'
+              ? 'radial-gradient(ellipse at center, rgba(80,60,10,0.9), rgba(10,5,0,0.95))'
+              : 'radial-gradient(ellipse at center, rgba(15,15,30,0.92), rgba(5,5,10,0.98))'
+          }} />
+          <div className="dialogue-box cutscene-dialogue">
+            {dialogueData.speaker && <div className="dialogue-speaker">{dialogueData.speaker}</div>}
+            <div className="dialogue-text">{dialogueData.text}</div>
+            <div className="dialogue-continue">{dialogueData.showContinue ? 'Click or press ENTER to continue...' : ''}</div>
+            <div className="dialogue-progress">{dialogueData.progress}</div>
+          </div>
         </div>
       )}
-      
+
+      {/* ── In-game NPC Dialogue Box ── */}
+      {!showPrologue && dialogueData && (gameState === 'playing' || gameState === 'paused') && (
+        <div className="dialogue-box ingame-dialogue" onClick={() => { const still = dialogueManager.current.advance(); setDialogueData(still ? dialogueManager.current.getCurrent() : null); }}>
+          {dialogueData.speaker && <div className="dialogue-speaker">{dialogueData.speaker}</div>}
+          <div className="dialogue-text">{dialogueData.text}</div>
+          <div className="dialogue-continue">{dialogueData.showContinue ? 'Click or ENTER...' : ''}</div>
+        </div>
+      )}
+
+      {/* ── Tutorial Tip ── */}
+      {tutorialStep && (gameState === 'playing') && !dialogueData && (
+        <div className="tutorial-banner">
+          <span className="tutorial-icon">TIP</span>
+          <span className="tutorial-text">{tutorialStep.text}</span>
+        </div>
+      )}
+
       {/* Game ready indicator */}
       {gameState === 'playing' && (
-        <div style={{
-          position: 'absolute',
-          bottom: '10px',
-          right: '10px',
-          color: '#00ff00',
-          fontSize: '12px',
-          opacity: 0.7
-        }}>
-          🟢 Game Active
+        <div className="status-chip status-playing">
+          Game Active
         </div>
       )}
       
-      {/* Pause indicator */}
+      {/* Pause overlay */}
       {gameState === 'paused' && (
-        <div style={{
-          position: 'absolute',
-          bottom: '10px',
-          right: '10px',
-          color: '#ffff00',
-          fontSize: '12px',
-          opacity: 0.7
-        }}>
-          ⏸️ Paused
+        <div className="pause-overlay">
+          <div className="pause-box">
+            <div className="pause-title">PAUSED</div>
+            <button className="pause-btn pause-btn-resume" onClick={() => { setScreenState('playing'); }}>▶ Resume</button>
+            <button className="pause-btn pause-btn-restart" onClick={() => { setScreenState('playing'); resetGame(); }}>↻ Restart</button>
+            <button className="pause-btn pause-btn-save" onClick={() => { savePlayerProgress(true); setShowModal(true); setModalContent('Progress saved!'); setTimeout(() => setShowModal(false), 1500); }}>💾 Save Game</button>
+            <button className="pause-btn pause-btn-exit" onClick={() => { savePlayerProgress(true); setScreenState('title'); screenManager.current.currentScreen = 'title'; musicManager.current.playTrack('title'); }}>🚪 Save & Exit to Menu</button>
+            <div className="pause-hint">ESC to resume • Q to quit • R to restart</div>
+          </div>
         </div>
       )}
       
@@ -3545,153 +4863,367 @@ function App() {
       
       {/* Achievement Popup */}
       {showAchievement && (
-        <div style={{
-          position: 'absolute',
-          top: '20px',
-          right: '20px',
-          background: 'linear-gradient(135deg, #FFD700, #FFA500)',
-          color: '#000',
-          padding: '15px',
-          borderRadius: '10px',
-          boxShadow: '0 4px 15px rgba(255, 215, 0, 0.3)',
-          zIndex: 1001,
-          minWidth: '250px'
-        }}>
+        <div className="achievement-popup">
           <div style={{ fontWeight: 'bold', fontSize: '16px' }}>🏆 Achievement Unlocked!</div>
           <div style={{ fontSize: '14px', marginTop: '5px' }}>{showAchievement.title}</div>
           <div style={{ fontSize: '12px', marginTop: '3px', opacity: 0.8 }}>{showAchievement.description}</div>
         </div>
       )}
       
-      {/* Game UI Panel - Only show during gameplay and pause */}
+      {/* ── Compact HUD Panel ── */}
       {(gameState === 'playing' || gameState === 'paused') && (
-        <div style={{
-          position: 'absolute',
-          top: '20px',
-          left: '20px',
-          background: 'rgba(0, 0, 0, 0.8)',
-          color: 'white',
-          padding: '15px',
-          borderRadius: '10px',
-          minWidth: '200px',
-          fontSize: '12px',
-          zIndex: 1000
-        }}>
-        <div style={{ fontWeight: 'bold', marginBottom: '10px', color: '#FFD700' }}>
-          👹 Devil's World Adventure
+        <div className="hud-panel">
+          <div className="hud-title">Devil's World</div>
+
+          {gamePoints && (
+            <>
+              <div className="hud-level-row">
+                <span className="hud-level-badge">Lv {currentLevel}</span>
+                <div className="level-bar-wrap" style={{flex:1}}>
+                  <div className="level-bar-fill" style={{ width: `${levelProgressPercent}%` }} />
+                </div>
+                <span className="hud-level-pct">{levelProgressPercent.toFixed(0)}%</span>
+              </div>
+
+              <div className="hud-stats-grid">
+                <span>XP {gamePoints.experience}</span>
+                <span>Gold {gamePoints.gold}</span>
+                <span>Crystals {gamePoints.crystals}</span>
+                <span>Mats {gamePoints.materials || 0}</span>
+              </div>
+            </>
+          )}
+
+          <div className="hud-row-compact">
+            <span>{timeOfDay} {isNight ? '🌙' : '☀️'}</span>
+            {walletConnected ? (
+              <span className="hud-wallet-tag" onClick={disconnectWallet} title="Click to disconnect">
+                {walletAddress.substring(0, 6)}...
+              </span>
+            ) : (
+              <button onClick={connectWallet} className="hud-btn hud-btn-primary" style={{fontSize:10, padding:'3px 8px'}}>
+                Connect Wallet
+              </button>
+            )}
+          </div>
+
+          <div className="hud-actions">
+            <button onClick={() => setShowInventory(prev => !prev)} className="hud-action-btn" title="Inventory (I)">I</button>
+            <button onClick={() => setShowBuildMenu(prev => !prev)} className="hud-action-btn" title="Build (B)">B</button>
+            <button onClick={() => setShowWorldMap(prev => !prev)} className="hud-action-btn" title="World Map (N)">N</button>
+            <button onClick={() => setShowWeb3Panel(prev => !prev)} className="hud-action-btn" title="Web3 Actions" style={{background: walletConnected ? '#22c55e33' : '#ef444433', color: walletConnected ? '#4ade80' : '#f87171'}}>⛓</button>
+            <button onClick={() => { savePlayerProgress(true); setScreenState('paused'); }} className="hud-action-btn" title="Save & Pause" style={{background:'rgba(245,158,11,0.2)', color:'#fbbf24'}}>⏸</button>
+          </div>
+
+          {/* Network Status */}
+          {walletConnected && (
+            <div style={{display:'flex', alignItems:'center', gap:4, padding:'2px 6px', fontSize:9, color:'#86efac', background:'rgba(34,197,94,0.12)', borderRadius:4, marginTop:4}}>
+              <span style={{width:6,height:6,borderRadius:'50%',background:'#22c55e',display:'inline-block'}}></span>
+              Avalanche Fuji • {walletAddress.substring(0,6)}...{walletAddress.slice(-4)}
+            </div>
+          )}
         </div>
-        
-        {!walletConnected ? (
-          <button 
-            onClick={connectWallet}
-            style={{
-              background: 'linear-gradient(135deg, #4CAF50, #45a049)',
-              color: 'white',
-              border: 'none',
-              padding: '8px 16px',
-              borderRadius: '5px',
-              cursor: 'pointer',
-              fontSize: '12px'
-            }}
-          >
-            🔗 Connect Wallet
-          </button>
-        ) : (
-          <div>
-            <div style={{ marginBottom: '5px' }}>
-              👤 {walletAddress.substring(0, 6)}...{walletAddress.substring(38)}
+      )}
+
+      {/* ── Web3 Blockchain Action Panel ── */}
+      {(gameState === 'playing' || gameState === 'paused') && showWeb3Panel && (
+        <div className="overlay-panel web3-panel" style={{right:10,left:'auto',top:60,width:310,maxHeight:'calc(100vh - 80px)',overflowY:'auto',background:'rgba(10,10,20,0.95)',border:'1px solid rgba(139,92,246,0.3)',borderRadius:10,backdropFilter:'blur(12px)'}}>
+          <div className="panel-header" style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 12px',borderBottom:'1px solid rgba(255,255,255,0.08)'}}>
+            <h3 style={{margin:0,fontSize:14,fontWeight:'bold',color:'#e2e8f0',letterSpacing:0.5}}>⛓ Blockchain Hub</h3>
+            <div style={{display:'flex',gap:6,alignItems:'center'}}>
+              {blockchainLoading && <span style={{fontSize:9,color:'#fbbf24',animation:'pulse 1s infinite'}}>⏳ {blockchainLoading}</span>}
+              <button onClick={() => setShowWeb3Panel(false)} style={{background:'none',border:'none',color:'#94a3b8',fontSize:16,cursor:'pointer',padding:0,lineHeight:1}}>✕</button>
             </div>
-            <div style={{ marginBottom: '5px' }}>
-              💰 {parseFloat(avaxBalance).toFixed(4)} AVAX
+          </div>
+
+          {!walletConnected ? (
+            <div style={{padding:16,textAlign:'center'}}>
+              <div style={{fontSize:36,marginBottom:8}}>🦊</div>
+              <p style={{color:'#94a3b8',fontSize:12,marginBottom:12}}>Connect MetaMask to interact with Avalanche Fuji Testnet</p>
+              <button onClick={connectWallet} style={{background:'linear-gradient(135deg,#e44d26,#f97316)',color:'#fff',border:'none',borderRadius:8,padding:'10px 24px',fontSize:13,fontWeight:'bold',cursor:'pointer',width:'100%',boxShadow:'0 2px 12px rgba(249,115,22,0.3)'}}>Connect Wallet</button>
+              <p style={{color:'#64748b',fontSize:9,marginTop:8}}>Avalanche Fuji Testnet • Chain ID 43113</p>
             </div>
-            <button 
-              onClick={disconnectWallet}
-              style={{
-                background: '#f44336',
-                color: 'white',
-                border: 'none',
-                padding: '4px 8px',
-                borderRadius: '3px',
-                cursor: 'pointer',
-                fontSize: '10px'
+          ) : (
+            <div style={{padding:8,display:'flex',flexDirection:'column',gap:6}}>
+
+              {/* ── Wallet & Balances ── */}
+              <div style={{background:'linear-gradient(135deg,rgba(139,92,246,0.12),rgba(59,130,246,0.08))',borderRadius:8,padding:10,border:'1px solid rgba(139,92,246,0.2)'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+                  <span style={{fontSize:9,color:'#a78bfa',textTransform:'uppercase',letterSpacing:1,fontWeight:'bold'}}>Wallet</span>
+                  <span style={{fontSize:9,color:'#86efac',background:'rgba(34,197,94,0.15)',padding:'1px 6px',borderRadius:3}}>● Fuji Testnet</span>
+                </div>
+                <div style={{fontSize:10,color:'#94a3b8',marginBottom:6,fontFamily:'monospace'}}>{walletAddress}</div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:4}}>
+                  <div style={{background:'rgba(0,0,0,0.3)',borderRadius:6,padding:'6px 4px',textAlign:'center'}}>
+                    <div style={{fontSize:13,fontWeight:'bold',color:'#f0d890'}}>{parseFloat(avaxBalance || 0).toFixed(3)}</div>
+                    <div style={{fontSize:8,color:'#94a3b8',marginTop:1}}>AVAX</div>
+                  </div>
+                  <div style={{background:'rgba(0,0,0,0.3)',borderRadius:6,padding:'6px 4px',textAlign:'center'}}>
+                    <div style={{fontSize:13,fontWeight:'bold',color:'#fbbf24'}}>{parseFloat(citBalance || 0).toFixed(1)}</div>
+                    <div style={{fontSize:8,color:'#94a3b8',marginTop:1}}>CIT</div>
+                  </div>
+                  <div style={{background:'rgba(0,0,0,0.3)',borderRadius:6,padding:'6px 4px',textAlign:'center'}}>
+                    <div style={{fontSize:13,fontWeight:'bold',color:'#c084fc'}}>{nftCount}</div>
+                    <div style={{fontSize:8,color:'#94a3b8',marginTop:1}}>NFTs</div>
+                  </div>
+                </div>
+                <button onClick={refreshBlockchainState} style={{width:'100%',marginTop:6,background:'rgba(255,255,255,0.06)',color:'#94a3b8',border:'1px solid rgba(255,255,255,0.08)',borderRadius:4,padding:'3px 0',fontSize:9,cursor:'pointer'}}>↻ Refresh Balances</button>
+              </div>
+
+              {/* ── Game Gold → CIT Exchange ── */}
+              <div style={{background:'linear-gradient(135deg,rgba(245,158,11,0.12),rgba(234,88,12,0.08))',borderRadius:8,padding:10,border:'1px solid rgba(245,158,11,0.25)'}}>
+                <div style={{fontSize:10,color:'#fbbf24',marginBottom:6,textTransform:'uppercase',letterSpacing:1,fontWeight:'bold'}}>💰 Gold → CIT Exchange</div>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+                  <span style={{fontSize:11,color:'#e2e8f0'}}>Your Gold: <b style={{color:'#fbbf24'}}>{gameStats.goldCollected}</b></span>
+                  <span style={{fontSize:9,color:'#94a3b8'}}>Rate: {EXCHANGE_RATE} gold = 1 CIT</span>
+                </div>
+                <div style={{display:'flex',gap:4}}>
+                  <button disabled={gameStats.goldCollected < EXCHANGE_RATE} onClick={() => exchangeGoldForCIT(EXCHANGE_RATE)} style={{flex:1,background:gameStats.goldCollected >= EXCHANGE_RATE ? '#d97706' : '#44403c',color:'#fff',border:'none',borderRadius:4,padding:'6px 0',fontSize:10,fontWeight:'bold',cursor:gameStats.goldCollected >= EXCHANGE_RATE ? 'pointer' : 'not-allowed',opacity:gameStats.goldCollected >= EXCHANGE_RATE ? 1 : 0.5}}>Exchange {EXCHANGE_RATE}g → 1 CIT</button>
+                  <button disabled={gameStats.goldCollected < EXCHANGE_RATE * 5} onClick={() => exchangeGoldForCIT(EXCHANGE_RATE * 5)} style={{flex:1,background:gameStats.goldCollected >= EXCHANGE_RATE * 5 ? '#b45309' : '#44403c',color:'#fff',border:'none',borderRadius:4,padding:'6px 0',fontSize:10,fontWeight:'bold',cursor:gameStats.goldCollected >= EXCHANGE_RATE * 5 ? 'pointer' : 'not-allowed',opacity:gameStats.goldCollected >= EXCHANGE_RATE * 5 ? 1 : 0.5}}>Exchange {EXCHANGE_RATE*5}g → 5 CIT</button>
+                </div>
+                <div style={{fontSize:8,color:'#a3a3a3',marginTop:4,textAlign:'center'}}>Costs 0.001 AVAX per CIT (on-chain mint)</div>
+              </div>
+
+              {/* ── AVAX Staking ── */}
+              <div style={{background:'rgba(59,130,246,0.08)',borderRadius:8,padding:10,border:'1px solid rgba(59,130,246,0.2)'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+                  <span style={{fontSize:10,color:'#60a5fa',textTransform:'uppercase',letterSpacing:1,fontWeight:'bold'}}>⚡ AVAX Staking</span>
+                  {avaxStakerInfo && avaxStakerInfo.isStaking && (() => {
+                    const tier = avaxStakerInfo.tier || 'Bronze';
+                    const badge = tier === 'Gold' ? '🥇' : tier === 'Silver' ? '🥈' : '🥉';
+                    const color = tier === 'Gold' ? '#fbbf24' : tier === 'Silver' ? '#94a3b8' : '#b87333';
+                    return <span style={{fontSize:9,color,background:'rgba(0,0,0,0.3)',padding:'2px 6px',borderRadius:4,fontWeight:'bold'}}>{badge} {tier}</span>;
+                  })()}
+                </div>
+                {avaxStakerInfo && avaxStakerInfo.isStaking && (
+                  <div style={{background:'rgba(0,0,0,0.25)',borderRadius:4,padding:'6px 8px',marginBottom:6,fontSize:9}}>
+                    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:3}}>
+                      <div style={{color:'#93c5fd'}}>Staked: <b style={{color:'#e2e8f0'}}>{parseFloat(avaxStakerInfo.stakedAmount||0).toFixed(4)} AVAX</b></div>
+                      <div style={{color:'#86efac'}}>APY: <b style={{color:'#4ade80'}}>{avaxStakerInfo.currentAPY || 10}%</b></div>
+                      <div style={{color:'#93c5fd'}}>Pending: <b style={{color:'#fde68a'}}>{parseFloat(avaxStakerInfo.pendingRewards||0).toFixed(6)} AVAX</b></div>
+                      <div style={{color:'#f9a8d4'}}>Multiplier: <b style={{color:'#fb7185'}}>{((avaxStakerInfo.multiplierBps_||10000)/10000).toFixed(2)}x</b></div>
+                    </div>
+                  </div>
+                )}
+                <div style={{display:'flex',gap:4}}>
+                  <button onClick={stakeCoins} style={{flex:1,background:'#2563eb',color:'#fff',border:'none',borderRadius:4,padding:'6px 0',fontSize:10,fontWeight:'bold',cursor:'pointer'}}>Stake 0.01</button>
+                  <button onClick={unstakeCoins} style={{flex:1,background:'#1e40af',color:'#fff',border:'none',borderRadius:4,padding:'6px 0',fontSize:10,fontWeight:'bold',cursor:'pointer'}}>Unstake</button>
+                  <button onClick={claimRewards} style={{flex:1,background:'#16a34a',color:'#fff',border:'none',borderRadius:4,padding:'6px 0',fontSize:10,fontWeight:'bold',cursor:'pointer'}}>Claim</button>
+                </div>
+                <div style={{fontSize:8,color:'#93c5fd',marginTop:4}}>🥉 Bronze 10% → 🥈 Silver 15% (7d) → 🥇 Gold 20% (30d)</div>
+                <div style={{fontSize:7,color:'#64748b',marginTop:2}}>5% of rewards support game development • Score boosts multiplier</div>
+              </div>
+
+              {/* ── NFT Achievements ── */}
+              <div style={{background:'rgba(168,85,247,0.08)',borderRadius:8,padding:10,border:'1px solid rgba(168,85,247,0.2)'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+                  <span style={{fontSize:10,color:'#c084fc',textTransform:'uppercase',letterSpacing:1,fontWeight:'bold'}}>🎨 NFT Achievements</span>
+                  <span style={{fontSize:9,color:'#a78bfa'}}>{nftCount} owned</span>
+                </div>
+                <div style={{display:'flex',gap:4}}>
+                  <button onClick={mintNFT} style={{flex:1,background:'linear-gradient(135deg,#7c3aed,#a855f7)',color:'#fff',border:'none',borderRadius:4,padding:'6px 0',fontSize:10,fontWeight:'bold',cursor:'pointer'}}>Mint NFT (0.0005)</button>
+                  <button onClick={() => mintAchievementNFT(`${gameStats.enemiesKilled} enemies defeated`)} style={{flex:1,background:'linear-gradient(135deg,#6d28d9,#8b5cf6)',color:'#fff',border:'none',borderRadius:4,padding:'6px 0',fontSize:10,fontWeight:'bold',cursor:'pointer'}}>🏆 Achievement</button>
+                </div>
+                <div style={{fontSize:8,color:'#a78bfa',marginTop:4}}>Achievement NFTs: kill enemies, collect gold, explore!</div>
+              </div>
+
+              {/* ── CIT Token ── */}
+              <div style={{background:'rgba(245,158,11,0.06)',borderRadius:8,padding:10,border:'1px solid rgba(245,158,11,0.15)'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+                  <span style={{fontSize:10,color:'#fbbf24',textTransform:'uppercase',letterSpacing:1,fontWeight:'bold'}}>🪙 CIT Token</span>
+                  <span style={{fontSize:9,color:'#fcd34d'}}>{parseFloat(citBalance || 0).toFixed(2)} CIT</span>
+                </div>
+                {citStakerInfo && citStakerInfo.isStaking && (
+                  <div style={{background:'rgba(0,0,0,0.25)',borderRadius:4,padding:4,marginBottom:6,fontSize:9,color:'#94a3b8'}}>
+                    Staked: {parseFloat(citStakerInfo.stakedAmount).toFixed(2)} CIT • Pending: {parseFloat(citStakerInfo.pendingRewards).toFixed(4)} CIT
+                  </div>
+                )}
+                <div style={{display:'flex',gap:4,marginBottom:4}}>
+                  <button onClick={() => mintCITTokens(10)} style={{flex:1,background:'#d97706',color:'#fff',border:'none',borderRadius:4,padding:'5px 0',fontSize:9,fontWeight:'bold',cursor:'pointer'}}>Mint 10 CIT</button>
+                  <button onClick={() => stakeCITTokens(10)} style={{flex:1,background:'#b45309',color:'#fff',border:'none',borderRadius:4,padding:'5px 0',fontSize:9,fontWeight:'bold',cursor:'pointer'}}>Stake 10</button>
+                </div>
+                <div style={{display:'flex',gap:4}}>
+                  <button onClick={claimCITRewards} style={{flex:1,background:'#16a34a',color:'#fff',border:'none',borderRadius:4,padding:'5px 0',fontSize:9,fontWeight:'bold',cursor:'pointer'}}>Claim CIT</button>
+                  <button onClick={unstakeCITTokens} style={{flex:1,background:'#991b1b',color:'#fff',border:'none',borderRadius:4,padding:'5px 0',fontSize:9,fontWeight:'bold',cursor:'pointer'}}>Unstake</button>
+                </div>
+              </div>
+
+              {/* ── Game Stats (on-chain context) ── */}
+              <div style={{background:'rgba(255,255,255,0.03)',borderRadius:8,padding:10,border:'1px solid rgba(255,255,255,0.06)'}}>
+                <div style={{fontSize:10,color:'#94a3b8',marginBottom:6,textTransform:'uppercase',letterSpacing:1,fontWeight:'bold'}}>📊 Game Stats</div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:4,fontSize:10}}>
+                  <div style={{color:'#e2e8f0'}}>⚔️ Kills: <b>{gameStats.enemiesKilled}</b></div>
+                  <div style={{color:'#fbbf24'}}>💰 Gold: <b>{gameStats.goldCollected}</b></div>
+                  <div style={{color:'#60a5fa'}}>📈 Points/s: <b>{realtimeStats.pointsPerSecond.toFixed(5)}</b></div>
+                  <div style={{color:'#4ade80'}}>⚡ Streak: <b>{playerStats.streak}</b></div>
+                </div>
+              </div>
+
+              {/* ── Transaction History ── */}
+              {txHistory.length > 0 && (
+                <div style={{background:'rgba(255,255,255,0.03)',borderRadius:8,padding:10,border:'1px solid rgba(255,255,255,0.06)'}}>
+                  <div style={{fontSize:10,color:'#94a3b8',marginBottom:6,textTransform:'uppercase',letterSpacing:1,fontWeight:'bold'}}>📋 Transaction History</div>
+                  <div style={{maxHeight:120,overflowY:'auto'}}>
+                    {txHistory.slice(0, 8).map((tx, i) => (
+                      <div key={i} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'3px 0',borderBottom:'1px solid rgba(255,255,255,0.04)',fontSize:9}}>
+                        <div>
+                          <span style={{color:'#e2e8f0',fontWeight:'bold'}}>{tx.type}</span>
+                          <span style={{color:'#64748b',marginLeft:4}}>{tx.amount}</span>
+                        </div>
+                        <a href={`https://testnet.snowtrace.io/tx/${tx.hash}`} target="_blank" rel="noopener noreferrer" style={{color:'#60a5fa',textDecoration:'none',fontFamily:'monospace',fontSize:8}}>{tx.hash.slice(0,8)}… ↗</a>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* ── Contract Addresses (for judges) ── */}
+              <div style={{background:'rgba(255,255,255,0.02)',borderRadius:8,padding:8,border:'1px solid rgba(255,255,255,0.04)'}}>
+                <div style={{fontSize:9,color:'#64748b',marginBottom:4,textTransform:'uppercase',letterSpacing:1}}>Deployed Contracts (Fuji)</div>
+                <div style={{fontSize:8,fontFamily:'monospace',color:'#475569',lineHeight:1.6}}>
+                  <div>Staking: <a href="https://testnet.snowtrace.io/address/0xC08f6E905C88Ae1252a78f3D6eCAb7CF7d27ac9f" target="_blank" rel="noopener noreferrer" style={{color:'#60a5fa'}}>0xC08f…ac9f</a></div>
+                  <div>NFT: <a href="https://testnet.snowtrace.io/address/0xBd852B73011eb7937993b06F43891dD67C31BC10" target="_blank" rel="noopener noreferrer" style={{color:'#60a5fa'}}>0xBd85…BC10</a></div>
+                  <div>CIT: <a href="https://testnet.snowtrace.io/address/0xCd5b54dBEa2bF1aE449361F5c35af1E4fbA8aCcC" target="_blank" rel="noopener noreferrer" style={{color:'#60a5fa'}}>0xCd5b…aCcC</a></div>
+                </div>
+              </div>
+
+              {/* ── Explorer Links ── */}
+              <div style={{display:'flex',gap:4,padding:'2px 0'}}>
+                <a href={`https://testnet.snowtrace.io/address/${walletAddress}`} target="_blank" rel="noopener noreferrer" style={{flex:1,textAlign:'center',color:'#60a5fa',fontSize:9,textDecoration:'none',background:'rgba(59,130,246,0.08)',borderRadius:4,padding:'4px 0'}}>My Wallet ↗</a>
+                <a href="https://faucet.avax.network/" target="_blank" rel="noopener noreferrer" style={{flex:1,textAlign:'center',color:'#f97316',fontSize:9,textDecoration:'none',background:'rgba(249,115,22,0.08)',borderRadius:4,padding:'4px 0'}}>Get Test AVAX ↗</a>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {(gameState === 'playing' || gameState === 'paused') && showWorldMap && (
+        <div className="overlay-panel worldmap-panel">
+          <div className="panel-header">
+            <h3 className="panel-title">World Map</h3>
+            <button onClick={() => setShowWorldMap(false)} className="panel-close">✕</button>
+          </div>
+          <div className="worldmap-stage">
+            <canvas
+              ref={(cvs) => {
+                if (!cvs) return;
+                const wctx = cvs.getContext('2d');
+                const mw = motherWorldRef.current;
+                const mapTiles = mw?.tiles;
+                if (!mapTiles || !mapTiles.length) return;
+                const mapH = mapTiles.length;
+                const mapW = mapTiles[0]?.length || 0;
+                const cw = cvs.width;
+                const ch = cvs.height;
+                const scaleX = cw / mapW;
+                const scaleY = ch / mapH;
+                // Tile colors
+                const tileColors = {
+                  0: '#000', 1: '#8b5e3b', 2: '#e8c27a', 3: '#3a8e41',
+                  5: '#6b6b6b', 6: '#0f2a4d', 7: '#2f74c0', 25: '#8a7f70',
+                  26: '#2b80ff', 27: '#1f6b2a', 28: '#a56b2b'
+                };
+                // Draw terrain
+                for (let r = 0; r < mapH; r++) {
+                  for (let c = 0; c < mapW; c++) {
+                    const t = mapTiles[r][c] || 0;
+                    wctx.fillStyle = tileColors[t] || '#222';
+                    wctx.fillRect(c * scaleX, r * scaleY, Math.ceil(scaleX), Math.ceil(scaleY));
+                  }
+                }
+                // Draw treasures
+                const area = gameMap.areas[gameMap.currentArea];
+                (area?.treasures || []).forEach(tr => {
+                  if (!tr.collected) {
+                    const tx = (tr.x / 8) * scaleX;
+                    const ty = (tr.y / 8) * scaleY;
+                    wctx.fillStyle = '#fbbf24';
+                    wctx.fillRect(tx - 3, ty - 3, 6, 6);
+                    wctx.strokeStyle = '#000';
+                    wctx.lineWidth = 0.5;
+                    wctx.strokeRect(tx - 3, ty - 3, 6, 6);
+                  }
+                });
+                // Draw NPCs/villages
+                (area?.npcs || []).forEach(npc => {
+                  const nx = (npc.x / 8) * scaleX;
+                  const ny = (npc.y / 8) * scaleY;
+                  wctx.fillStyle = '#fff';
+                  wctx.fillRect(nx - 2, ny - 2, 4, 4);
+                });
+                // Draw player
+                const pl = gameWorldState.current.player;
+                const px = (pl.x / 8) * scaleX;
+                const py = (pl.y / 8) * scaleY;
+                wctx.fillStyle = '#ff3333';
+                wctx.beginPath();
+                wctx.arc(px, py, 4, 0, Math.PI * 2);
+                wctx.fill();
+                wctx.strokeStyle = '#fff';
+                wctx.lineWidth = 1.5;
+                wctx.stroke();
               }}
-            >
-              Disconnect
-            </button>
+              width={480}
+              height={360}
+              style={{ width: '100%', borderRadius: '6px', imageRendering: 'pixelated', cursor: 'pointer' }}
+              onClick={(e) => {
+                const cvs = e.target;
+                const rect = cvs.getBoundingClientRect();
+                const clickX = (e.clientX - rect.left) / rect.width;
+                const clickY = (e.clientY - rect.top) / rect.height;
+                const mw = motherWorldRef.current;
+                if (!mw?.tiles?.length) return;
+                const mapW = mw.tiles[0].length;
+                const mapH = mw.tiles.length;
+                const destX = clickX * mapW * 8;
+                const destY = clickY * mapH * 8;
+                const player = gameWorldState.current.player;
+                const camera = gameWorldState.current.camera;
+                const viewport = computeViewportSize();
+                const zoomScale = gameWorldState.current.zoomScale || 1.5;
+                const vw = viewport.width / zoomScale;
+                const vh = viewport.height / zoomScale;
+                const wPx = mapW * 8;
+                const hPx = mapH * 8;
+                player.x = clamp(destX, 16, Math.max(16, wPx - 48));
+                player.y = clamp(destY, 40, Math.max(40, hPx - 48));
+                camera.x = clamp(player.x - vw / 2, 0, Math.max(0, wPx - vw));
+                camera.y = clamp(player.y - vh / 2, 0, Math.max(0, hPx - vh));
+                setShowWorldMap(false);
+                if (canvasRef.current) canvasRef.current.focus();
+              }}
+            />
           </div>
-        )}
-        
-        {gamePoints && (
-          <div style={{ marginTop: '10px', borderTop: '1px solid #444', paddingTop: '10px' }}>
-            <div>📊 Level: {pointSystem.current?.getLevel() || 1}</div>
-            <div>⭐ XP: {gamePoints.experience}</div>
-            <div>🪙 Gold: {gamePoints.gold}</div>
-            <div>💎 Crystals: {gamePoints.crystals}</div>
-            <div>🧱 Materials: {gamePoints.materials || 0}</div>
-            <div style={{ fontSize: '10px', marginTop: '5px', opacity: 0.7 }}>
-              🏆 Achievements: {achievements.length}
-            </div>
-            <div style={{ fontSize: '10px', marginTop: '5px', borderTop: '1px solid #444', paddingTop: '5px' }}>
-              <div>⏰ {timeOfDay} {isNight ? '🌙' : '☀️'}</div>
-              <div>🎵 Music: M to toggle | +/- volume</div>
-              <div>I - Inventory | B - Build</div>
-            </div>
-          </div>
-        )}
+          <div className="worldmap-help">Click map to teleport. Gold = Treasure, White = Village, Red = You</div>
         </div>
       )}
       
       {/* Inventory UI - Only show during active gameplay */}
       {gameState === 'playing' && showInventory && inventorySystem.current && (
-        <div style={{
-          position: 'absolute',
-          top: '50%',
-          left: '50%',
-          transform: 'translate(-50%, -50%)',
-          background: 'rgba(0, 0, 0, 0.9)',
-          color: 'white',
-          padding: '20px',
-          borderRadius: '10px',
-          minWidth: '400px',
-          maxHeight: '500px',
-          overflowY: 'auto',
-          zIndex: 1002
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-            <h3 style={{ margin: 0, color: '#FFD700' }}>🎒 Inventory</h3>
-            <button onClick={() => setShowInventory(false)} style={{
-              background: '#f44336', color: 'white', border: 'none', 
-              padding: '5px 10px', borderRadius: '3px', cursor: 'pointer'
-            }}>✕</button>
+        <div className="overlay-panel inventory-panel">
+          <div className="panel-header">
+            <h3 className="panel-title">Inventory</h3>
+            <button onClick={() => setShowInventory(false)} className="panel-close">✕</button>
           </div>
           
           {Object.entries(inventorySystem.current.inventory).map(([category, items]) => (
-            <div key={category} style={{ marginBottom: '15px' }}>
-              <h4 style={{ margin: '0 0 10px 0', color: '#87CEEB', textTransform: 'capitalize' }}>
+            <div key={category} className="panel-block">
+              <h4 className="panel-category">
                 {category} ({items.length}/{inventorySystem.current.maxSlots[category]})
               </h4>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(80px, 1fr))', gap: '5px' }}>
+              <div className="item-grid">
                 {items.map((item, index) => (
-                  <div key={index} style={{
-                    background: 'rgba(255, 255, 255, 0.1)',
-                    padding: '8px',
-                    borderRadius: '5px',
-                    textAlign: 'center',
-                    fontSize: '10px',
-                    border: item.rarity === 'legendary' ? '2px solid #FFD700' : 
-                           item.rarity === 'rare' ? '2px solid #9932CC' :
-                           item.rarity === 'uncommon' ? '2px solid #32CD32' : '1px solid #666'
-                  }}>
-                    <div style={{ fontWeight: 'bold' }}>{item.name}</div>
-                    {item.quantity > 1 && <div>x{item.quantity}</div>}
-                    <div style={{ opacity: 0.7 }}>{item.value}g</div>
+                  <div key={index} className={`item-card rarity-${item.rarity || 'common'}`}>
+                    <div className="item-name">{item.name}</div>
+                    {item.quantity > 1 && <div className="item-qty">x{item.quantity}</div>}
+                    <div className="item-value">{item.value}g</div>
                   </div>
                 ))}
               </div>
             </div>
           ))}
           
-          <div style={{ marginTop: '15px', fontSize: '12px', opacity: 0.7 }}>
+          <div className="panel-footer">
             Total Items: {inventorySystem.current.getTotalItems()}
           </div>
         </div>
@@ -3699,43 +5231,24 @@ function App() {
       
       {/* Building Menu - Only show during active gameplay */}
       {gameState === 'playing' && showBuildMenu && infrastructureSystem.current && (
-        <div style={{
-          position: 'absolute',
-          top: '20px',
-          right: '250px',
-          background: 'rgba(0, 0, 0, 0.9)',
-          color: 'white',
-          padding: '15px',
-          borderRadius: '10px',
-          minWidth: '300px',
-          zIndex: 1002
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-            <h3 style={{ margin: 0, color: '#FFD700' }}>🏗️ Build Infrastructure</h3>
-            <button onClick={() => setShowBuildMenu(false)} style={{
-              background: '#f44336', color: 'white', border: 'none', 
-              padding: '5px 10px', borderRadius: '3px', cursor: 'pointer'
-            }}>✕</button>
+        <div className="overlay-panel build-panel">
+          <div className="panel-header">
+            <h3 className="panel-title">Build</h3>
+            <button onClick={() => setShowBuildMenu(false)} className="panel-close">✕</button>
           </div>
           
           {Object.entries(infrastructureSystem.current.buildingTypes).map(([type, building]) => {
             const canAfford = infrastructureSystem.current.canAfford(type);
             return (
-              <div key={type} style={{
-                background: canAfford.canAfford ? 'rgba(0, 255, 0, 0.1)' : 'rgba(255, 0, 0, 0.1)',
-                padding: '10px',
-                marginBottom: '10px',
-                borderRadius: '5px',
-                border: canAfford.canAfford ? '1px solid #4CAF50' : '1px solid #f44336'
-              }}>
-                <div style={{ fontWeight: 'bold', marginBottom: '5px' }}>{building.name}</div>
-                <div style={{ fontSize: '11px', marginBottom: '5px' }}>{building.description}</div>
-                <div style={{ fontSize: '10px', marginBottom: '5px' }}>
+              <div key={type} className={`build-card ${canAfford.canAfford ? 'build-ok' : 'build-locked'}`}>
+                <div className="build-name">{building.name}</div>
+                <div className="build-desc">{building.description}</div>
+                <div className="build-meta">
                   Cost: {Object.entries(building.cost).map(([resource, amount]) => 
                     `${amount} ${resource}`
                   ).join(', ')}
                 </div>
-                <div style={{ fontSize: '10px', marginBottom: '8px' }}>
+                <div className="build-meta">
                   Build Time: {Math.floor(building.buildTime / 1000)}s
                 </div>
                 <button 
@@ -3747,15 +5260,7 @@ function App() {
                     }
                   }}
                   disabled={!canAfford.canAfford}
-                  style={{
-                    background: canAfford.canAfford ? '#4CAF50' : '#666',
-                    color: 'white',
-                    border: 'none',
-                    padding: '5px 10px',
-                    borderRadius: '3px',
-                    cursor: canAfford.canAfford ? 'pointer' : 'not-allowed',
-                    fontSize: '10px'
-                  }}
+                  className={`build-select ${canAfford.canAfford ? 'build-select-ok' : 'build-select-off'}`}
                 >
                   {canAfford.canAfford ? 'Select' : `Need ${canAfford.missing}`}
                 </button>
@@ -3763,7 +5268,7 @@ function App() {
             );
           })}
           
-          <div style={{ marginTop: '15px', fontSize: '11px', opacity: 0.7 }}>
+          <div className="panel-footer">
             Buildings: {infrastructureSystem.current.buildings.length}
           </div>
         </div>
@@ -3771,19 +5276,8 @@ function App() {
       
       {/* Building Mode Indicator - Only show during active gameplay */}
       {gameState === 'playing' && buildingMode && selectedBuildingType && (
-        <div style={{
-          position: 'absolute',
-          bottom: '20px',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          background: 'rgba(255, 165, 0, 0.9)',
-          color: 'black',
-          padding: '10px 20px',
-          borderRadius: '20px',
-          fontWeight: 'bold',
-          zIndex: 1002
-        }}>
-          🏗️ Click to place {infrastructureSystem.current.buildingTypes[selectedBuildingType].name} | ESC to cancel
+        <div className="build-indicator">
+          Click to place {infrastructureSystem.current.buildingTypes[selectedBuildingType].name} | ESC to cancel
         </div>
       )}
     </div>

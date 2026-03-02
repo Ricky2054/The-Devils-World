@@ -1,6 +1,6 @@
 # 😈 Devil World - Smart Contracts
 
-Real smart contracts for the Devil World game, deployed on our custom L1 blockchain network.
+Real smart contracts for the Devil World game, deployed on Avalanche Fuji testnet.
 
 ## 📋 Contracts Overview
 
@@ -16,10 +16,25 @@ Real smart contracts for the Devil World game, deployed on our custom L1 blockch
 
 ## 🚀 Quick Start
 
+### ▶️ Run Commands (Simple)
+
+```bash
+# 1) Install dependencies
+npm install
+
+# 2) Start game (development)
+npm start
+
+# 3) Production build
+npm run build
+```
+
+Open http://localhost:3000 after `npm start`.
+
 ### Prerequisites
 - Node.js (v16+)
 - npm or yarn
-- MetaMask with custom L1 network configured
+- MetaMask with Avalanche Fuji testnet configured
 - Native tokens for gas fees and staking
 
 ### Installation
@@ -30,8 +45,8 @@ npm install
 # Compile contracts
 npm run compile
 
-# Run tests
-npm test
+# Run smart contract tests
+npx hardhat test
 ```
 
 ### Deployment
@@ -40,23 +55,21 @@ npm test
 Create a `.env` file:
 ```env
 PRIVATE_KEY=your_private_key_here
-CUSTOM_L1_RPC_URL=your_custom_l1_rpc_url_here
+FUJI_RPC_URL=https://api.avax-test.network/ext/bc/C/rpc
 BLOCK_EXPLORER_API_KEY=your_block_explorer_api_key_here
 ```
 
-#### 2. Deploy to Custom L1 Network
+#### 2. Deploy to Avalanche Fuji Testnet
 ```bash
-npm run deploy
+npm run deploy:fuji
 ```
 
 #### 3. Verify contracts (optional)
-```bash
-npm run verify
-```
+> Contract verification command is optional and can be added with Snowtrace API setup.
 
 ## 📝 Contract Addresses
 
-### 🚀 Deployed Contracts on Custom L1 Network
+### 🚀 Deployed Contracts on Avalanche Fuji Testnet
 
 ```javascript
 // Native Token Staking Contract
@@ -70,9 +83,9 @@ const TOKEN_CONTRACT = "0xd66487C006D8eF71512244eD8f9fA5377F65D208";
 ```
 
 ### 🔗 Block Explorer Links
-- **Staking Contract**: `https://explorer.your-custom-l1.com/address/0x961474F7615b2ecc02feF01c6c83042628648C68`
-- **NFT Contract**: `https://explorer.your-custom-l1.com/address/0x591219308029e3AC0B5068DB628e7DAD716a5ab2`
-- **Token Contract**: `https://explorer.your-custom-l1.com/address/0xd66487C006D8eF71512244eD8f9fA5377F65D208`
+- **Staking Contract**: `https://testnet.snowtrace.io/address/0x961474F7615b2ecc02feF01c6c83042628648C68`
+- **NFT Contract**: `https://testnet.snowtrace.io/address/0x591219308029e3AC0B5068DB628e7DAD716a5ab2`
+- **Token Contract**: `https://testnet.snowtrace.io/address/0xd66487C006D8eF71512244eD8f9fA5377F65D208`
 
 ## 🎮 Game Integration
 
@@ -161,10 +174,10 @@ After deployment, check contract stats:
 
 ## 🔍 Verification
 
-Contracts are automatically verified on our custom block explorer:
-- **Staking Contract**: `https://explorer.your-custom-l1.com/address/0x961474F7615b2ecc02feF01c6c83042628648C68`
-- **NFT Contract**: `https://explorer.your-custom-l1.com/address/0x591219308029e3AC0B5068DB628e7DAD716a5ab2`
-- **Token Contract**: `https://explorer.your-custom-l1.com/address/0xd66487C006D8eF71512244eD8f9fA5377F65D208`
+Contracts are verifiable on Snowtrace testnet:
+- **Staking Contract**: `https://testnet.snowtrace.io/address/0x961474F7615b2ecc02feF01c6c83042628648C68`
+- **NFT Contract**: `https://testnet.snowtrace.io/address/0x591219308029e3AC0B5068DB628e7DAD716a5ab2`
+- **Token Contract**: `https://testnet.snowtrace.io/address/0xd66487C006D8eF71512244eD8f9fA5377F65D208`
 
 ## 🛡️ Security Features
 
@@ -208,8 +221,8 @@ Contracts are automatically verified on our custom block explorer:
 For issues or questions:
 - Check the test files for usage examples
 - Review the contract code for implementation details
-- Test on local network before custom L1 deployment
-- Ensure your custom L1 network is properly configured
+- Test on Hardhat/localhost before Fuji deployment
+- Ensure Avalanche Fuji is selected in MetaMask
 
 ## 📄 License
 

@@ -10,60 +10,127 @@ import {
 export class BlockchainManager {
   constructor() {
     this.provider = null;
+    this.ethereumProvider = null;
     this.signer = null;
     this.userAddress = null;
     this.isConnected = false;
     this.network = null;
+    this.isConnecting = false;
+  }
+
+  getNetworkDisplayName(chainId, fallbackName = 'Unknown Network') {
+    const normalized = typeof chainId === 'bigint' ? Number(chainId) : Number(chainId || 0);
+    const networkNames = {
+      43113: 'Avalanche Fuji Testnet',
+      43114: 'Avalanche C-Chain Mainnet',
+      1: 'Ethereum Mainnet',
+      11155111: 'Sepolia'
+    };
+
+    return networkNames[normalized] || fallbackName;
+  }
+
+  resolveMetaMaskProvider() {
+    const ethereum = window?.ethereum;
+    if (!ethereum) return null;
+
+    if (ethereum.isMetaMask) {
+      return ethereum;
+    }
+
+    if (Array.isArray(ethereum.providers)) {
+      const metaMaskProvider = ethereum.providers.find((provider) => provider?.isMetaMask);
+      if (metaMaskProvider) return metaMaskProvider;
+    }
+
+    return null;
   }
 
   // Connect to MetaMask and Avalanche network
   async connectWallet() {
+    if (this.isConnecting) {
+      throw new Error('Wallet connection already in progress. Please approve in MetaMask.');
+    }
+
+    this.isConnecting = true;
     try {
-      if (!window.ethereum) {
+      const detectedProvider = this.resolveMetaMaskProvider();
+      if (!detectedProvider || typeof detectedProvider.request !== 'function') {
         throw new Error('MetaMask not installed');
       }
 
-      // Request account access
-      await window.ethereum.request({ method: 'eth_requestAccounts' });
+      this.ethereumProvider = detectedProvider;
+
+      if (typeof this.ethereumProvider.request === 'function') {
+        try {
+          await this.ethereumProvider.request({
+            method: 'wallet_requestPermissions',
+            params: [{ eth_accounts: {} }],
+          });
+        } catch (permissionError) {
+          if (permissionError?.code === 4001) {
+            throw new Error('Connection was rejected in MetaMask. Please click Connect and approve.');
+          }
+          if (permissionError?.code !== -32601) {
+            console.warn('wallet_requestPermissions failed, continuing with eth_requestAccounts:', permissionError);
+          }
+        }
+      }
+
+      const accounts = await this.ethereumProvider.request({ method: 'eth_requestAccounts' });
+      if (!accounts || accounts.length === 0) {
+        throw new Error('No wallet account available. Please unlock MetaMask.');
+      }
       
-      this.provider = new BrowserProvider(window.ethereum);
+      this.provider = new BrowserProvider(this.ethereumProvider);
+
+      // Check if we're on Avalanche network
+      await this.ensureAvalancheNetwork(this.ethereumProvider);
+
+      // Recreate signer/network after any possible chain switch
+      this.provider = new BrowserProvider(this.ethereumProvider);
       this.signer = await this.provider.getSigner();
       this.userAddress = await this.signer.getAddress();
       this.network = await this.provider.getNetwork();
-
-      // Check if we're on Avalanche network
-      await this.ensureAvalancheNetwork();
+      const networkName = this.getNetworkDisplayName(this.network.chainId, this.network.name);
       
       this.isConnected = true;
       console.log('🔗 Connected to wallet:', this.userAddress);
-      console.log('🏔️ Network:', this.network.name);
+      console.log('🏔️ Network:', networkName);
       
       return {
         address: this.userAddress,
-        network: this.network.name,
+        network: networkName,
         connected: true
       };
     } catch (error) {
       console.error('❌ Wallet connection failed:', error);
+      if (error?.code === 4001) {
+        throw new Error('Connection was rejected in MetaMask. Please click Connect and approve.');
+      }
+      if (error?.code === -32002) {
+        throw new Error('MetaMask already has a pending connection request. Open MetaMask and approve it.');
+      }
       throw error;
+    } finally {
+      this.isConnecting = false;
     }
   }
 
   // Ensure we're connected to Avalanche network
-  async ensureAvalancheNetwork() {
-    const avalancheChainId = '0xA86A'; // Avalanche C-Chain mainnet
+  async ensureAvalancheNetwork(provider) {
     const avalancheTestnetChainId = '0xA869'; // Avalanche Fuji testnet
     
     try {
       // Try to switch to Avalanche network
-      await window.ethereum.request({
+      await provider.request({
         method: 'wallet_switchEthereumChain',
         params: [{ chainId: avalancheTestnetChainId }], // Use testnet for development
       });
     } catch (switchError) {
       // If network doesn't exist, add it
       if (switchError.code === 4902) {
-        await window.ethereum.request({
+        await provider.request({
           method: 'wallet_addEthereumChain',
           params: [{
             chainId: avalancheTestnetChainId,
@@ -77,7 +144,15 @@ export class BlockchainManager {
             blockExplorerUrls: ['https://testnet.snowtrace.io/']
           }]
         });
+        return;
       }
+
+      if (switchError?.code === 4001 || switchError?.code === -32002) {
+        console.warn('⚠️ User did not complete network switch, continuing with current network.');
+        return;
+      }
+
+      throw switchError;
     }
   }
 
@@ -122,8 +197,8 @@ export class BlockchainManager {
 
   // Listen for account changes
   setupEventListeners(onAccountChange, onNetworkChange) {
-    if (window.ethereum) {
-      window.ethereum.on('accountsChanged', (accounts) => {
+    if (this.ethereumProvider) {
+      this.ethereumProvider.on('accountsChanged', (accounts) => {
         if (accounts.length === 0) {
           this.disconnect();
         } else {
@@ -132,7 +207,7 @@ export class BlockchainManager {
         }
       });
 
-      window.ethereum.on('chainChanged', (chainId) => {
+      this.ethereumProvider.on('chainChanged', (chainId) => {
         onNetworkChange && onNetworkChange(chainId);
         // Reload the page to reset state
         window.location.reload();
@@ -143,6 +218,7 @@ export class BlockchainManager {
   // Disconnect wallet
   disconnect() {
     this.provider = null;
+    this.ethereumProvider = null;
     this.signer = null;
     this.userAddress = null;
     this.isConnected = false;

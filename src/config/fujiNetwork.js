@@ -1,18 +1,18 @@
-// Local Avalanche Network Configuration
+// Avalanche Fuji Testnet Configuration
 export const FUJI_NETWORK_CONFIG = {
-  name: "Avalanche Local",
-  rpcUrl: "http://127.0.0.1:8545",
-  chainId: 31337, // Hardhat local network
+  name: "Avalanche Fuji Testnet",
+  rpcUrl: "https://api.avax-test.network/ext/bc/C/rpc",
+  chainId: 43113,
   currencySymbol: "AVAX",
-  blockExplorer: "",
+  blockExplorer: "https://testnet.snowtrace.io",
   gasPrice: 25000000000,
 };
 
-// Contract addresses for local network (update with your deployed addresses)
+// Contract addresses for Fuji testnet (override with REACT_APP_* env vars when needed)
 export const FUJI_CONTRACT_ADDRESSES = {
-  STAKING: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-  NFT: "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
-  TOKEN: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  STAKING: process.env.REACT_APP_STAKING_ADDRESS || "0xC08f6E905C88Ae1252a78f3D6eCAb7CF7d27ac9f",
+  NFT: process.env.REACT_APP_NFT_ADDRESS || "0xBd852B73011eb7937993b06F43891dD67C31BC10",
+  TOKEN: process.env.REACT_APP_TOKEN_ADDRESS || "0xCd5b54dBEa2bF1aE449361F5c35af1E4fbA8aCcC",
 };
 
 // Network detection helper

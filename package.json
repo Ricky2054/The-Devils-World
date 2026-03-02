@@ -15,10 +15,12 @@
   "dependencies": {
     "@metamask/detect-provider": "^2.0.0",
     "@openzeppelin/contracts": "^5.4.0",
+    "@react-three/fiber": "^8.17.10",
     "ethers": "^6.13.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-scripts": "5.0.1"
+    "react-scripts": "5.0.1",
+    "three": "^0.169.0"
   },
   "browserslist": {
     "production": [

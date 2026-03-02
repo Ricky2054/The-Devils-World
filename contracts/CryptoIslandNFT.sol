@@ -2,16 +2,18 @@
 pragma solidity ^0.8.19;
 
 /**
- * @title Crypto Island NFT Collection
- * @dev Simple NFT contract for Crypto Island Adventure Game
- * @author Crypto Island Adventure Game
+ * @title Crypto Island NFT Collection — Enhanced
+ * @dev  Simple NFT contract for Crypto Island Adventure Game.
+ *       5% of every mint payment is forwarded to the treasury (developer wallet) at mint time.
+ *       Remaining 95% accumulates in the contract for owner withdrawal.
  */
 contract CryptoIslandNFT {
-    // Events
+    // ─── Events ────────────────────────────────────────────────────────────────
     event NFTMinted(address indexed to, uint256 tokenId, uint256 timestamp);
     event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+    event TreasuryFeeCollected(address indexed treasury, uint256 amount, uint256 timestamp);
     
-    // State variables
+    // ─── State variables ────────────────────────────────────────────────────────
     mapping(uint256 => address) private _owners;
     mapping(address => uint256) private _balances;
     mapping(uint256 => address) private _tokenApprovals;
@@ -22,10 +24,16 @@ contract CryptoIslandNFT {
     string private _baseTokenURI = "https://crypto-island-adventure.com/metadata/";
     
     uint256 private _tokenIdCounter;
-    uint256 public constant MINT_PRICE = 0.0005 ether; // 0.0005 AVAX
-    uint256 public constant MAX_SUPPLY = 10000;
-    bool public mintingPaused = false;
+    uint256 public constant MINT_PRICE        = 0.0005 ether; // 0.0005 AVAX
+    uint256 public constant MAX_SUPPLY        = 10000;
+    uint256 public constant TREASURY_FEE_BPS  = 500;   // 5% of each mint
+    uint256 public constant BPS_DENOMINATOR   = 10000;
+    bool    public mintingPaused              = false;
     address public owner;
+    address public treasury;
+
+    uint256 public totalTreasuryCollected;
+    uint256 public totalMintRevenue;
     
     // NFT metadata
     struct NFTMetadata {
@@ -54,12 +62,13 @@ contract CryptoIslandNFT {
         _;
     }
     
-    // Constructor
-    constructor() {
-        owner = msg.sender;
+    // ─── Constructor ───────────────────────────────────────────────────────────
+    constructor(address _treasury) {
+        owner    = msg.sender;
+        treasury = _treasury != address(0) ? _treasury : msg.sender;
     }
     
-    // Mint NFT
+    // ─── Mint NFT ──────────────────────────────────────────────────────────────
     function mintNFT() external payable whenNotPaused validMint {
         uint256 tokenId = _tokenIdCounter;
         _tokenIdCounter++;
@@ -73,6 +82,22 @@ contract CryptoIslandNFT {
             image: string(abi.encodePacked(_baseTokenURI, _toString(tokenId), ".png")),
             attributes: _generateAttributes(tokenId)
         });
+
+        // ── Treasury fee: 5% of mint price → treasury (dev wallet) ──
+        uint256 fee = (MINT_PRICE * TREASURY_FEE_BPS) / BPS_DENOMINATOR;
+        totalTreasuryCollected += fee;
+        totalMintRevenue       += msg.value;
+        if (fee > 0) {
+            (bool t, ) = payable(treasury).call{value: fee}("");
+            require(t, "Treasury fee transfer failed");
+            emit TreasuryFeeCollected(treasury, fee, block.timestamp);
+        }
+
+        // Refund any overpayment
+        if (msg.value > MINT_PRICE) {
+            (bool r, ) = payable(msg.sender).call{value: msg.value - MINT_PRICE}("");
+            require(r, "Refund failed");
+        }
         
         emit NFTMinted(msg.sender, tokenId, block.timestamp);
     }
@@ -148,8 +173,14 @@ contract CryptoIslandNFT {
     function unpauseMinting() external onlyOwner {
         mintingPaused = false;
     }
+
+    // Update treasury wallet (only owner)
+    function setTreasury(address _treasury) external onlyOwner {
+        require(_treasury != address(0), "Zero address");
+        treasury = _treasury;
+    }
     
-    // Withdraw funds
+    // Withdraw accumulated (95%) mint revenue to owner
     function withdraw() external onlyOwner {
         uint256 balance = address(this).balance;
         require(balance > 0, "No funds to withdraw");

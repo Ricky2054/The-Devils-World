@@ -1,7 +1,7 @@
 import "dotenv/config";
 import "@nomicfoundation/hardhat-ethers";
 
-const hardhatKey = process.env.HARDHAT_PRIVATE_KEY;
+const hardhatKey = process.env.PRIVATE_KEY;
 
 /** @type import('hardhat/config').HardhatUserConfig */
 export default {
@@ -15,12 +15,6 @@ export default {
     },
   },
   networks: {
-    local: {
-      type: "http",
-      url: "http://127.0.0.1:9650/ext/bc/C/rpc",
-      chainId: 43112,
-      ...(hardhatKey ? { accounts: [hardhatKey] } : {}),
-    },
     fuji: {
       type: "http",
       url: "https://api.avax-test.network/ext/bc/C/rpc",

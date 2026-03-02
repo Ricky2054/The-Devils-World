@@ -1,11 +1,12 @@
 import { ethers } from 'ethers';
-import { CONTRACT_ADDRESSES, STAKING_ABI, NFT_ABI } from '../contracts/contracts.js';
+import { STAKING_ABI, NFT_ABI } from '../contracts/contracts.js';
 import { TOKEN_ABI } from '../contracts/tokenABI.js';
 import { FUJI_NETWORK_CONFIG, FUJI_CONTRACT_ADDRESSES, isFujiNetwork } from '../config/fujiNetwork.js';
 
 class ContractService {
   constructor() {
     this.provider = null;
+    this.ethereumProvider = null;
     this.signer = null;
     this.stakingContract = null;
     this.nftContract = null;
@@ -13,14 +14,20 @@ class ContractService {
   }
 
   // Initialize provider and signer
-  async initialize() {
-    if (typeof window.ethereum !== 'undefined') {
-      this.provider = new ethers.BrowserProvider(window.ethereum);
+  async initialize(providerOverride = null) {
+    const selectedProvider = providerOverride || window.ethereum;
+
+    if (typeof selectedProvider !== 'undefined' && selectedProvider) {
+      this.ethereumProvider = selectedProvider;
+      this.provider = new ethers.BrowserProvider(selectedProvider);
       this.signer = await this.provider.getSigner();
       
       // Get current network
       const network = await this.provider.getNetwork();
       const isFuji = isFujiNetwork(Number(network.chainId));
+      if (!isFuji) {
+        throw new Error(`Wrong network detected. Please switch to ${FUJI_NETWORK_CONFIG.name} (chainId ${FUJI_NETWORK_CONFIG.chainId}).`);
+      }
       
       console.log('Current network:', network);
       console.log('Is Fuji network:', isFuji);
@@ -107,10 +114,13 @@ class ContractService {
     try {
       const stakerInfo = await this.stakingContract.getStakerInfo(address);
       return {
-        stakedAmount: ethers.formatEther(stakerInfo.stakedAmount),
+        stakedAmount:     ethers.formatEther(stakerInfo.stakedAmount),
         stakingTimestamp: Number(stakerInfo.stakingTimestamp),
-        pendingRewards: ethers.formatEther(stakerInfo.pendingRewards),
-        isStaking: stakerInfo.isStaking
+        pendingRewards:   ethers.formatEther(stakerInfo.pendingRewards),
+        isStaking:        stakerInfo.isStaking,
+        tier:             stakerInfo.tier,
+        multiplierBps:    Number(stakerInfo.multiplierBps_),
+        currentAPY:       Number(stakerInfo.currentAPY)
       };
     } catch (error) {
       console.error('Get staker info error:', error);
@@ -132,13 +142,57 @@ class ContractService {
     try {
       const stats = await this.stakingContract.getContractStats();
       return {
-        totalStaked: ethers.formatEther(stats.totalStaked),
-        totalRewardsPaid: ethers.formatEther(stats.totalRewardsPaid),
-        contractBalance: ethers.formatEther(stats.contractBalance)
+        totalStaked:             ethers.formatEther(stats._totalStaked),
+        totalRewardsPaid:        ethers.formatEther(stats._totalRewardsPaid),
+        totalTreasuryCollected:  ethers.formatEther(stats._totalTreasuryCollected),
+        contractBalance:         ethers.formatEther(stats.contractBalance)
       };
     } catch (error) {
       console.error('Get contract stats error:', error);
       return null;
+    }
+  }
+
+  // ── NEW: AVAX staking tier & score helpers ────────────────────────────────
+
+  /**
+   * @returns {Promise<string>} "Bronze" | "Silver" | "Gold" | "None"
+   */
+  async getStakerTier(address) {
+    try {
+      return await this.stakingContract.getStakerTier(address);
+    } catch (error) {
+      console.error('Get staker tier error:', error);
+      return 'None';
+    }
+  }
+
+  /**
+   * @returns {Promise<{net: string, fee: string}>} net reward & treasury fee in AVAX
+   */
+  async getStakerNetRewards(address) {
+    try {
+      const result = await this.stakingContract.calculateNetRewards(address);
+      return {
+        net: ethers.formatEther(result.net),
+        fee: ethers.formatEther(result.fee)
+      };
+    } catch (error) {
+      console.error('Get net rewards error:', error);
+      return { net: '0.0', fee: '0.0' };
+    }
+  }
+
+  /**
+   * @returns {Promise<number>} multiplierBps e.g. 10000 = 1×, 20000 = 2×
+   */
+  async getScoreMultiplier(address) {
+    try {
+      const bps = await this.stakingContract.scoreMultiplierBps(address);
+      return Number(bps) || 10000;
+    } catch (error) {
+      console.error('Get score multiplier error:', error);
+      return 10000;
     }
   }
 
@@ -285,16 +339,65 @@ class ContractService {
 
   async getTokenStakerInfo(address) {
     try {
+      // Use the new getStakerInfo function on the CIT contract (added in enhanced version)
       const stakerInfo = await this.tokenContract.getStakerInfo(address);
       return {
-        stakedAmount: ethers.formatEther(stakerInfo.stakedAmount),
+        stakedAmount:     ethers.formatEther(stakerInfo.stakedAmount),
         stakingTimestamp: Number(stakerInfo.stakingTimestamp),
-        pendingRewards: ethers.formatEther(stakerInfo.pendingRewards),
-        isStaking: stakerInfo.isStaking
+        pendingRewards:   ethers.formatEther(stakerInfo.pendingRewards),
+        isStaking:        stakerInfo.isStaking,
+        tier:             stakerInfo.tier,
+        multiplierBps:    Number(stakerInfo.multiplierBps_),
+        currentAPY:       Number(stakerInfo.currentAPY)
       };
     } catch (error) {
-      console.error('Get token staker info error:', error);
-      return null;
+      // Fallback to raw stakers mapping for backwards compatibility
+      try {
+        const s = await this.tokenContract.stakers(address);
+        const pendingRewards = await this.tokenContract.calculateRewards(address);
+        return {
+          stakedAmount:     ethers.formatEther(s.stakedAmount),
+          stakingTimestamp: Number(s.stakingTimestamp),
+          pendingRewards:   ethers.formatEther(pendingRewards),
+          isStaking:        s.isStaking,
+          tier:             'Bronze',
+          multiplierBps:    10000,
+          currentAPY:       10
+        };
+      } catch (e) {
+        console.error('Get token staker info error:', e);
+        return null;
+      }
+    }
+  }
+
+  // ── NEW: CIT staking tier & score helpers ─────────────────────────────────
+
+  /**
+   * @returns {Promise<string>} "Bronze" | "Silver" | "Gold" | "None"
+   */
+  async getTokenStakerTier(address) {
+    try {
+      return await this.tokenContract.getStakerTier(address);
+    } catch (error) {
+      console.error('Get token staker tier error:', error);
+      return 'None';
+    }
+  }
+
+  /**
+   * @returns {Promise<{net: string, fee: string}>} net CIT reward & treasury fee
+   */
+  async getTokenNetRewards(address) {
+    try {
+      const result = await this.tokenContract.calculateNetRewards(address);
+      return {
+        net: ethers.formatEther(result.net),
+        fee: ethers.formatEther(result.fee)
+      };
+    } catch (error) {
+      console.error('Get token net rewards error:', error);
+      return { net: '0.0', fee: '0.0' };
     }
   }
 
@@ -310,33 +413,43 @@ class ContractService {
 
   async getTokenInfo() {
     try {
-      const tokenInfo = await this.tokenContract.getTokenInfo();
+      // Read individual ERC-20 fields (getTokenInfo view doesn't exist on-chain)
+      const [name, symbol, totalSupply] = await Promise.all([
+        this.tokenContract.name(),
+        this.tokenContract.symbol(),
+        this.tokenContract.totalSupply()
+      ]);
       return {
-        name: tokenInfo[0],
-        symbol: tokenInfo[1],
-        decimals: Number(tokenInfo[2]),
-        totalSupply: ethers.formatEther(tokenInfo[3]),
-        maxSupply: ethers.formatEther(tokenInfo[4]),
-        mintPrice: ethers.formatEther(tokenInfo[5])
+        name,
+        symbol,
+        decimals: 18,
+        totalSupply: ethers.formatEther(totalSupply),
+        maxSupply: '10000000', // MAX_SUPPLY constant
+        mintPrice: '0.001'     // MINT_PRICE constant
       };
     } catch (error) {
       console.error('Get token info error:', error);
-      return null;
+      return { name: 'Crypto Island Token', symbol: 'CIT', decimals: 18, totalSupply: '0', maxSupply: '10000000', mintPrice: '0.001' };
     }
   }
 
   async getTokenContractStats() {
     try {
-      const stats = await this.tokenContract.getContractStats();
+      // Read available on-chain fields (getContractStats doesn't exist on CIT)
+      const [totalSupply, totalStaked] = await Promise.all([
+        this.tokenContract.totalSupply(),
+        this.tokenContract.totalStaked()
+      ]);
+      const contractBalance = await this.provider.getBalance(await this.tokenContract.getAddress());
       return {
-        totalStaked: ethers.formatEther(stats[0]),
-        totalRewardsPaid: ethers.formatEther(stats[1]),
-        contractBalance: ethers.formatEther(stats[2]),
-        totalSupply: ethers.formatEther(stats[3])
+        totalStaked: ethers.formatEther(totalStaked),
+        totalRewardsPaid: '0',
+        contractBalance: ethers.formatEther(contractBalance),
+        totalSupply: ethers.formatEther(totalSupply)
       };
     } catch (error) {
       console.error('Get token contract stats error:', error);
-      return null;
+      return { totalStaked: '0', totalRewardsPaid: '0', contractBalance: '0', totalSupply: '0' };
     }
   }
 

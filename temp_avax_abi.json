@@ -1,0 +1,732 @@
+﻿[
+    {
+        "inputs":  [
+                       {
+                           "internalType":  "address",
+                           "name":  "_treasury",
+                           "type":  "address"
+                       }
+                   ],
+        "stateMutability":  "nonpayable",
+        "type":  "constructor"
+    },
+    {
+        "anonymous":  false,
+        "inputs":  [
+                       {
+                           "indexed":  true,
+                           "internalType":  "address",
+                           "name":  "owner",
+                           "type":  "address"
+                       },
+                       {
+                           "indexed":  false,
+                           "internalType":  "uint256",
+                           "name":  "amount",
+                           "type":  "uint256"
+                       },
+                       {
+                           "indexed":  false,
+                           "internalType":  "uint256",
+                           "name":  "timestamp",
+                           "type":  "uint256"
+                       }
+                   ],
+        "name":  "EmergencyWithdraw",
+        "type":  "event"
+    },
+    {
+        "anonymous":  false,
+        "inputs":  [
+                       {
+                           "indexed":  true,
+                           "internalType":  "address",
+                           "name":  "user",
+                           "type":  "address"
+                       },
+                       {
+                           "indexed":  false,
+                           "internalType":  "uint256",
+                           "name":  "netReward",
+                           "type":  "uint256"
+                       },
+                       {
+                           "indexed":  false,
+                           "internalType":  "uint256",
+                           "name":  "fee",
+                           "type":  "uint256"
+                       },
+                       {
+                           "indexed":  false,
+                           "internalType":  "uint256",
+                           "name":  "timestamp",
+                           "type":  "uint256"
+                       }
+                   ],
+        "name":  "RewardsClaimed",
+        "type":  "event"
+    },
+    {
+        "anonymous":  false,
+        "inputs":  [
+                       {
+                           "indexed":  true,
+                           "internalType":  "address",
+                           "name":  "user",
+                           "type":  "address"
+                       },
+                       {
+                           "indexed":  false,
+                           "internalType":  "uint256",
+                           "name":  "multiplierBps",
+                           "type":  "uint256"
+                       }
+                   ],
+        "name":  "ScoreMultiplierUpdated",
+        "type":  "event"
+    },
+    {
+        "anonymous":  false,
+        "inputs":  [
+                       {
+                           "indexed":  true,
+                           "internalType":  "address",
+                           "name":  "user",
+                           "type":  "address"
+                       },
+                       {
+                           "indexed":  false,
+                           "internalType":  "uint256",
+                           "name":  "amount",
+                           "type":  "uint256"
+                       },
+                       {
+                           "indexed":  false,
+                           "internalType":  "uint256",
+                           "name":  "timestamp",
+                           "type":  "uint256"
+                       }
+                   ],
+        "name":  "Staked",
+        "type":  "event"
+    },
+    {
+        "anonymous":  false,
+        "inputs":  [
+                       {
+                           "indexed":  true,
+                           "internalType":  "address",
+                           "name":  "user",
+                           "type":  "address"
+                       },
+                       {
+                           "indexed":  false,
+                           "internalType":  "string",
+                           "name":  "tier",
+                           "type":  "string"
+                       }
+                   ],
+        "name":  "TierChanged",
+        "type":  "event"
+    },
+    {
+        "anonymous":  false,
+        "inputs":  [
+                       {
+                           "indexed":  true,
+                           "internalType":  "address",
+                           "name":  "treasury",
+                           "type":  "address"
+                       },
+                       {
+                           "indexed":  false,
+                           "internalType":  "uint256",
+                           "name":  "amount",
+                           "type":  "uint256"
+                       },
+                       {
+                           "indexed":  false,
+                           "internalType":  "uint256",
+                           "name":  "timestamp",
+                           "type":  "uint256"
+                       }
+                   ],
+        "name":  "TreasuryFeeCollected",
+        "type":  "event"
+    },
+    {
+        "anonymous":  false,
+        "inputs":  [
+                       {
+                           "indexed":  true,
+                           "internalType":  "address",
+                           "name":  "user",
+                           "type":  "address"
+                       },
+                       {
+                           "indexed":  false,
+                           "internalType":  "uint256",
+                           "name":  "amount",
+                           "type":  "uint256"
+                       },
+                       {
+                           "indexed":  false,
+                           "internalType":  "uint256",
+                           "name":  "timestamp",
+                           "type":  "uint256"
+                       }
+                   ],
+        "name":  "Unstaked",
+        "type":  "event"
+    },
+    {
+        "stateMutability":  "payable",
+        "type":  "fallback"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "BPS_DENOMINATOR",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "BRONZE_APY",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "GOLD_APY",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "GOLD_THRESHOLD",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "MAX_MULTIPLIER",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "MINIMUM_STAKE",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "SILVER_APY",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "SILVER_THRESHOLD",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "TREASURY_FEE_BPS",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "addToStake",
+        "outputs":  [
+
+                    ],
+        "stateMutability":  "payable",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+                       {
+                           "internalType":  "address",
+                           "name":  "stakerAddress",
+                           "type":  "address"
+                       }
+                   ],
+        "name":  "calculateNetRewards",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "net",
+                            "type":  "uint256"
+                        },
+                        {
+                            "internalType":  "uint256",
+                            "name":  "fee",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+                       {
+                           "internalType":  "address",
+                           "name":  "stakerAddress",
+                           "type":  "address"
+                       }
+                   ],
+        "name":  "calculateRewards",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "claimRewards",
+        "outputs":  [
+
+                    ],
+        "stateMutability":  "nonpayable",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "emergencyWithdraw",
+        "outputs":  [
+
+                    ],
+        "stateMutability":  "nonpayable",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "fundRewards",
+        "outputs":  [
+
+                    ],
+        "stateMutability":  "payable",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "getContractStats",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "_totalStaked",
+                            "type":  "uint256"
+                        },
+                        {
+                            "internalType":  "uint256",
+                            "name":  "_totalRewardsPaid",
+                            "type":  "uint256"
+                        },
+                        {
+                            "internalType":  "uint256",
+                            "name":  "_totalTreasuryCollected",
+                            "type":  "uint256"
+                        },
+                        {
+                            "internalType":  "uint256",
+                            "name":  "contractBalance",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+                       {
+                           "internalType":  "address",
+                           "name":  "stakerAddress",
+                           "type":  "address"
+                       }
+                   ],
+        "name":  "getStakerInfo",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "stakedAmount",
+                            "type":  "uint256"
+                        },
+                        {
+                            "internalType":  "uint256",
+                            "name":  "stakingTimestamp",
+                            "type":  "uint256"
+                        },
+                        {
+                            "internalType":  "uint256",
+                            "name":  "pendingRewards",
+                            "type":  "uint256"
+                        },
+                        {
+                            "internalType":  "bool",
+                            "name":  "isStaking",
+                            "type":  "bool"
+                        },
+                        {
+                            "internalType":  "string",
+                            "name":  "tier",
+                            "type":  "string"
+                        },
+                        {
+                            "internalType":  "uint256",
+                            "name":  "multiplierBps_",
+                            "type":  "uint256"
+                        },
+                        {
+                            "internalType":  "uint256",
+                            "name":  "currentAPY",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+                       {
+                           "internalType":  "address",
+                           "name":  "stakerAddress",
+                           "type":  "address"
+                       }
+                   ],
+        "name":  "getStakerTier",
+        "outputs":  [
+                        {
+                            "internalType":  "string",
+                            "name":  "",
+                            "type":  "string"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "owner",
+        "outputs":  [
+                        {
+                            "internalType":  "address",
+                            "name":  "",
+                            "type":  "address"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "pauseStaking",
+        "outputs":  [
+
+                    ],
+        "stateMutability":  "nonpayable",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+                       {
+                           "internalType":  "address",
+                           "name":  "",
+                           "type":  "address"
+                       }
+                   ],
+        "name":  "scoreMultiplierBps",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+                       {
+                           "internalType":  "address",
+                           "name":  "player",
+                           "type":  "address"
+                       },
+                       {
+                           "internalType":  "uint256",
+                           "name":  "multiplierBps",
+                           "type":  "uint256"
+                       }
+                   ],
+        "name":  "setPlayerScoreMultiplier",
+        "outputs":  [
+
+                    ],
+        "stateMutability":  "nonpayable",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+                       {
+                           "internalType":  "address",
+                           "name":  "_treasury",
+                           "type":  "address"
+                       }
+                   ],
+        "name":  "setTreasury",
+        "outputs":  [
+
+                    ],
+        "stateMutability":  "nonpayable",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "stake",
+        "outputs":  [
+
+                    ],
+        "stateMutability":  "payable",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+                       {
+                           "internalType":  "address",
+                           "name":  "",
+                           "type":  "address"
+                       }
+                   ],
+        "name":  "stakers",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "stakedAmount",
+                            "type":  "uint256"
+                        },
+                        {
+                            "internalType":  "uint256",
+                            "name":  "stakingTimestamp",
+                            "type":  "uint256"
+                        },
+                        {
+                            "internalType":  "uint256",
+                            "name":  "lastRewardClaim",
+                            "type":  "uint256"
+                        },
+                        {
+                            "internalType":  "bool",
+                            "name":  "isStaking",
+                            "type":  "bool"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "stakingPaused",
+        "outputs":  [
+                        {
+                            "internalType":  "bool",
+                            "name":  "",
+                            "type":  "bool"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "totalRewardsPaid",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "totalStaked",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "totalTreasuryCollected",
+        "outputs":  [
+                        {
+                            "internalType":  "uint256",
+                            "name":  "",
+                            "type":  "uint256"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "treasury",
+        "outputs":  [
+                        {
+                            "internalType":  "address",
+                            "name":  "",
+                            "type":  "address"
+                        }
+                    ],
+        "stateMutability":  "view",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "unpauseStaking",
+        "outputs":  [
+
+                    ],
+        "stateMutability":  "nonpayable",
+        "type":  "function"
+    },
+    {
+        "inputs":  [
+
+                   ],
+        "name":  "unstake",
+        "outputs":  [
+
+                    ],
+        "stateMutability":  "nonpayable",
+        "type":  "function"
+    },
+    {
+        "stateMutability":  "payable",
+        "type":  "receive"
+    }
+]
