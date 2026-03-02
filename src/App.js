@@ -180,6 +180,7 @@ function App() {
   const [walletConnected, setWalletConnected] = useState(false);
   const [walletAddress, setWalletAddress] = useState('');
   const walletAddressRef = useRef(''); // ref so game-loop closures always read latest wallet
+  const deathTimerRef = useRef(0); // frames to hold death animation before showing game over screen
   const [avaxBalance, setAvaxBalance] = useState('0');
   const [gamePoints, setGamePoints] = useState(null);
   const [achievements, setAchievements] = useState([]);
@@ -458,17 +459,27 @@ function App() {
 
   // Trigger game over
   const triggerGameOver = () => {
+    const ps = pointSystem.current;
+    const kills = gameWorldState.current?.enemies
+      ? Object.values(gameWorldState.current.enemies || {}).filter(e => e.health <= 0).length
+      : gameStats.enemiesKilled;
+    const level = ps?.getLevel() || gameStats.level || 1;
+    const gold = gameStats.goldCollected || 0;
     const finalStats = {
       ...gameStats,
       timePlayed: gameStartTime ? (Date.now() - gameStartTime) / 1000 : 0,
-      experience: pointSystem.current?.points.experience || 0,
-      gold: pointSystem.current?.points.gold || 0,
-      crystals: pointSystem.current?.points.crystals || 0,
-      level: pointSystem.current?.getLevel() || 1
+      experience: ps?.points.experience || 0,
+      gold: ps?.points.gold || 0,
+      crystals: ps?.points.crystals || 0,
+      level,
+      totalScore: (gameStats.enemiesKilled * 100) + (gold * 10) + (level * 500),
     };
     
+    deathTimerRef.current = 0; // reset for next game
     setGameStats(finalStats);
-    setGameState('gameOver');
+    // Use setScreenState so gameStateRef.current is updated — otherwise the render loop
+    // keeps drawing the game world instead of the game over screen.
+    setScreenState('gameOver');
     screenManager.current.gameOver(finalStats, walletAddressRef.current || 'Anonymous');
     
     // Play game over music
@@ -1862,9 +1873,14 @@ function App() {
     let moveY = 0;
     const moveSpeed = 3;
 
-    // Check for game over condition
+    // Check for game over condition — hold death animation for ~1.5s before switching screen
     if (player.health <= 0 && gameStateRef.current === 'playing') {
-      triggerGameOver();
+      player.state = 'death'; // lock player in death pose
+      if (deathTimerRef.current <= 0) deathTimerRef.current = 90; // (re)start 90-frame countdown
+      deathTimerRef.current--;
+      if (deathTimerRef.current <= 0) {
+        triggerGameOver();
+      }
       return;
     }
     
@@ -2283,7 +2299,8 @@ function App() {
         screenManager.current.drawTitleScreen(ctx, canvas);
         return;
       } else if (gameStateRef.current === 'gameOver') {
-        screenManager.current.drawGameOverScreen(ctx, canvas, gameStats);
+        // Use stats cached at game-over time to avoid stale React closure
+        screenManager.current.drawGameOverScreen(ctx, canvas, screenManager.current.cachedGameStats || gameStats);
         return;
       } else if (gameStateRef.current === 'scoreboard') {
         const scores = screenManager.current.loadScores();

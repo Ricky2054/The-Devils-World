@@ -1011,6 +1011,7 @@ export class GameScreenManager {
   // Trigger game over
   gameOver(gameStats, walletAddress) {
     this.currentScreen = 'gameOver';
+    this.cachedGameStats = gameStats; // cache so draw always has correct data
     this.finalScore = this.calculateFinalScore(gameStats);
     this.gameOverAnimationTime = 0;
     
