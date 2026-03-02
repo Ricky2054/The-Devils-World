@@ -3240,14 +3240,17 @@ function App() {
       ctx.fillText(`${label} ${Math.round(value * 100)}%`, bx + 4, by + barFullH - 2);
     };
 
-    // Life bar
+    // Life bar — read directly from game-world ref so it's always live
+    // (the render closure is captured in RAF and would see stale React state otherwise)
     const statStartX = badgeX + badgeW + 20;
-    drawStatBar(statStartX, 6, assets.uiHeart, 'HP', hud.life, 1,
-      hud.life > 0.5 ? 'rgb(80, 210, 80)' : hud.life > 0.25 ? 'rgb(230, 180, 40)' : 'rgb(220, 50, 50)', '#fff');
+    const liveHealth = (gameWorldState.current.player?.health ?? 100) / (gameWorldState.current.player?.maxHealth ?? 100);
+    const liveHunger = energySystemRef.current ? energySystemRef.current.state().hunger : 0;
+    drawStatBar(statStartX, 6, assets.uiHeart, 'HP', liveHealth, 1,
+      liveHealth > 0.5 ? 'rgb(80, 210, 80)' : liveHealth > 0.25 ? 'rgb(230, 180, 40)' : 'rgb(220, 50, 50)', '#fff');
 
     // Hunger bar
     const hungerX = statStartX + 148;
-    drawStatBar(hungerX, 6, assets.uiEnergy, 'HGR', hud.hunger, 1,
+    drawStatBar(hungerX, 6, assets.uiEnergy, 'HGR', liveHunger, 1,
       'rgb(100, 180, 255)', '#fff');
 
     // Points (gold counter)
