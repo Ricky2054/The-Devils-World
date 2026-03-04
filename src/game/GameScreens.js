@@ -898,7 +898,7 @@ export class GameScreenManager {
   calculateFinalScore(gameStats) {
     const score = 
       (gameStats.experience || 0) * 1 +
-      (gameStats.gold || 0) * 2 +
+      (gameStats.goldCollected || gameStats.gold || 0) * 2 +
       (gameStats.crystals || 0) * 100 +
       (gameStats.enemiesKilled || 0) * 50 +
       (gameStats.buildingsBuilt || 0) * 200 +

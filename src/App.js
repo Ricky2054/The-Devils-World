@@ -512,19 +512,21 @@ function App() {
   // Trigger game over
   const triggerGameOver = () => {
     const ps = pointSystem.current;
-    const kills = gameWorldState.current?.enemies
-      ? Object.values(gameWorldState.current.enemies || {}).filter(e => e.health <= 0).length
-      : gameStats.enemiesKilled;
-    const level = ps?.getLevel() || gameStats.level || 1;
-    const gold = gameStats.goldCollected || 0;
+    const level = ps?.getLevel() || 1;
+    // Use refs for accurate data (gameStats is stale inside RAF closure)
+    const totalKills = pendingRewardRef.current.kills || 0;
+    const totalGold = pendingRewardRef.current.gold || 0;
     const finalStats = {
-      ...gameStats,
       timePlayed: gameStartTime ? (Date.now() - gameStartTime) / 1000 : 0,
       experience: ps?.points.experience || 0,
-      gold: ps?.points.gold || 0,
+      goldCollected: totalGold,
+      gold: totalGold,
       crystals: ps?.points.crystals || 0,
       level,
-      totalScore: (gameStats.enemiesKilled * 100) + (gold * 10) + (level * 500),
+      enemiesKilled: totalKills,
+      buildingsBuilt: 0,
+      achievementsUnlocked: 0,
+      totalScore: (totalKills * 100) + (totalGold * 10) + (level * 500),
     };
     
     deathTimerRef.current = 0; // reset for next game
@@ -1408,7 +1410,7 @@ function App() {
 
     // Entities
     const npcs = villages.map((v, i) => ({ x: v.x * 8, y: v.y * 8, type: 'villager', village: `Village ${i + 1}` }));
-    const treasures = Array.from({ length: 20 }, (_, i) => ({ x: Math.floor(rng() * width) * 8, y: Math.floor(rng() * height) * 8, type: 'gold', value: 1 + Math.floor(rng() * 50), collected: false }));
+    const treasures = Array.from({ length: 20 }, (_, i) => { const val = 1 + Math.floor(rng() * 50); return { x: Math.floor(rng() * width) * 8, y: Math.floor(rng() * height) * 8, type: 'gold', name: val >= 30 ? 'Rare Chest' : val >= 10 ? 'Treasure Chest' : 'Gold', value: val, collected: false }; });
     const enemies = Array.from({ length: 30 }, () => ({ x: Math.floor(rng() * width) * 8, y: Math.floor(rng() * height) * 8, width: 16, height: 16, type: rng() < 0.55 ? 'bee' : 'snail', difficulty: rng() < 0.2 ? 'hard' : rng() < 0.6 ? 'medium' : 'easy', facingRight: rng() < 0.5, health: 100, maxHealth: 100 }));
 
     // Spawn near middle village or center
@@ -1635,7 +1637,7 @@ function App() {
       if (!isWalkableAtPixel(px, py)) continue;
       if (Math.hypot(px - spawn.x, py - spawn.y) < 180) continue;
       if (!hasMinDistance(px, py, treasures, treasureMinDistance)) continue;
-      treasures.push({ x: px, y: py, type: rng() < 0.15 ? 'diamond' : 'gold', value: 10 + Math.floor(rng() * 60), collected: false });
+      { const tType = rng() < 0.15 ? 'diamond' : 'gold'; const tVal = 10 + Math.floor(rng() * 60); treasures.push({ x: px, y: py, type: tType, name: tType === 'diamond' ? 'Diamond' : tVal >= 40 ? 'Rare Chest' : 'Treasure Chest', value: tVal, collected: false }); }
     }
 
     const enemies = (spec.enemies || []).map(e => ({ ...e, health: e.health || 100, maxHealth: e.maxHealth || 100 }));
@@ -2330,7 +2332,8 @@ function App() {
         
         // Show collection message (with streak info if applicable)
         const streakStr = streakMult > 1.05 ? ` (x${streakMult.toFixed(1)} streak!)` : '';
-        setModalContent(`Found ${treasure.name}! +${boostedValue} Gold${streakStr}`);
+        const tName = treasure.name || (treasure.type === 'diamond' ? 'Diamond' : treasure.value >= 30 ? 'Rare Chest' : treasure.value >= 10 ? 'Treasure Chest' : 'Gold');
+        setModalContent(`Found ${tName}! +${boostedValue} Gold${streakStr}`);
         setShowModal(true);
         setTimeout(() => setShowModal(false), 3000);
       }
