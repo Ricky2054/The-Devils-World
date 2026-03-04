@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import { STAKING_ABI, NFT_ABI } from '../contracts/contracts.js';
+import { STAKING_ABI, NFT_ABI, LEADERBOARD_ABI } from '../contracts/contracts.js';
 import { TOKEN_ABI } from '../contracts/tokenABI.js';
 import { FUJI_NETWORK_CONFIG, FUJI_CONTRACT_ADDRESSES, isFujiNetwork } from '../config/fujiNetwork.js';
 
@@ -11,6 +11,7 @@ class ContractService {
     this.stakingContract = null;
     this.nftContract = null;
     this.tokenContract = null;
+    this.leaderboardContract = null;
   }
 
   // Initialize provider and signer
@@ -53,6 +54,12 @@ class ContractService {
       this.tokenContract = new ethers.Contract(
         contractAddresses.TOKEN,
         TOKEN_ABI,
+        this.signer
+      );
+      
+      this.leaderboardContract = new ethers.Contract(
+        contractAddresses.LEADERBOARD,
+        LEADERBOARD_ABI,
         this.signer
       );
       
@@ -477,7 +484,79 @@ class ContractService {
 
   // Check if contracts are initialized
   isInitialized() {
-    return this.provider && this.signer && this.stakingContract && this.nftContract && this.tokenContract;
+    return this.provider && this.signer && this.stakingContract && this.nftContract && this.tokenContract && this.leaderboardContract;
+  }
+
+  // ── Leaderboard contract methods ──────────────────────────────────────────
+
+  /**
+   * Submit player score to on-chain leaderboard
+   * Called when player mints an achievement NFT
+   */
+  async submitScore(score, kills, gold, level) {
+    try {
+      const tx = await this.leaderboardContract.submitScore(
+        Math.floor(score), Math.floor(kills), Math.floor(gold), Math.floor(level)
+      );
+      await tx.wait();
+      return tx;
+    } catch (error) {
+      console.error('Submit score error:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get all scores from on-chain leaderboard (cross-device, global)
+   * Returns array sorted by score descending
+   */
+  async getAllScores() {
+    try {
+      // Use a read-only provider so anyone can read even without connecting wallet
+      const readProvider = new ethers.JsonRpcProvider(FUJI_NETWORK_CONFIG.rpcUrl);
+      const readContract = new ethers.Contract(
+        FUJI_CONTRACT_ADDRESSES.LEADERBOARD,
+        LEADERBOARD_ABI,
+        readProvider
+      );
+      const rawScores = await readContract.getAllScores();
+      const scores = rawScores.map(s => ({
+        player: s.player,
+        playerName: s.player.slice(0, 6) + '...' + s.player.slice(-4),
+        fullAddress: s.player,
+        score: Number(s.score),
+        kills: Number(s.kills),
+        gold: Number(s.gold),
+        level: Number(s.level),
+        timestamp: Number(s.timestamp),
+        date: new Date(Number(s.timestamp) * 1000).toLocaleDateString(),
+      }));
+      // Sort by score descending
+      scores.sort((a, b) => b.score - a.score);
+      return scores.slice(0, 50);
+    } catch (error) {
+      console.error('Get all scores error:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get player count from leaderboard
+   */
+  async getLeaderboardPlayerCount() {
+    try {
+      const readProvider = new ethers.JsonRpcProvider(FUJI_NETWORK_CONFIG.rpcUrl);
+      const readContract = new ethers.Contract(
+        FUJI_CONTRACT_ADDRESSES.LEADERBOARD,
+        LEADERBOARD_ABI,
+        readProvider
+      );
+      const count = await readContract.getPlayerCount();
+      return Number(count);
+    } catch (error) {
+      console.error('Get player count error:', error);
+      return 0;
+    }
   }
 }
 

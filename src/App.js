@@ -104,6 +104,10 @@ function App() {
   // ── Gold Drops (enemy loot on ground with decay) ──
   const goldDropsRef = useRef([]); // [{x, y, value, spawnTime, lifetime}]
 
+  // ── On-chain leaderboard cache (fetched from blockchain) ──
+  const blockchainScoresRef = useRef([]); // cached blockchain scores for RAF render
+  const blockchainScoresFetchedRef = useRef(false);
+
   // Force refresh UI to ensure updates are visible
   const forceRefreshUI = () => {
     // Force a re-render by updating a dummy state
@@ -377,6 +381,16 @@ function App() {
       case 'showScoreboard':
         setScreenState('scoreboard');
         screenManager.current.currentScreen = 'scoreboard';
+        // Fetch on-chain leaderboard scores (async — updates ref for RAF render)
+        blockchainScoresRef.current = []; // clear stale
+        blockchainScoresFetchedRef.current = false;
+        contractService.getAllScores().then(scores => {
+          blockchainScoresRef.current = scores;
+          blockchainScoresFetchedRef.current = true;
+        }).catch(err => {
+          console.error('Failed to fetch blockchain scores:', err);
+          blockchainScoresFetchedRef.current = true;
+        });
         break;
       case 'showHelp':
         setScreenState('help');
@@ -2445,7 +2459,8 @@ function App() {
         screenManager.current.drawGameOverScreen(ctx, canvas, screenManager.current.cachedGameStats || gameStats);
         return;
       } else if (gameStateRef.current === 'scoreboard') {
-        const scores = screenManager.current.loadScores();
+        // Use cached blockchain scores (fetched async outside RAF)
+        const scores = blockchainScoresRef.current;
         screenManager.current.drawScoreboard(ctx, canvas, scores);
         return;
       } else if (gameStateRef.current === 'help') {
@@ -4915,14 +4930,33 @@ function App() {
           updateRealtimeStatsImmediately();
         }, 100); // Small delay to ensure state is updated
         
+        // === Submit game stats to on-chain leaderboard ===
+        try {
+          const totalKills = pendingRewardRef.current.kills || 0;
+          const totalGold = pendingRewardRef.current.gold || 0;
+          const level = pointSystem.current?.getLevel?.() || 1;
+          const score = (totalKills * 100) + (totalGold * 10) + (level * 500);
+          
+          setModalContent('✅ NFT Minted! Now submitting your stats to the on-chain leaderboard...');
+          setShowModal(true);
+          
+          await contractService.submitScore(score, totalKills, totalGold, level);
+          
+          setModalContent(`✅ NFT Minted & Stats On-Chain!\nScore: ${score} | Kills: ${totalKills} | Gold: ${totalGold} | Lv${level}\nTX: ${tx.hash}\n🔗 https://testnet.snowtrace.io/tx/${tx.hash}`);
+          setShowModal(true);
+          setTimeout(() => setShowModal(false), 6000);
+        } catch (lbErr) {
+          console.error('Leaderboard submit failed (NFT still minted):', lbErr);
+          setModalContent(`✅ NFT Minted! (Leaderboard update failed)\nTX: ${tx.hash}\n🔗 https://testnet.snowtrace.io/tx/${tx.hash}`);
+          setShowModal(true);
+          setTimeout(() => setShowModal(false), 5000);
+        }
+        
         // Update leaderboard with AVAX points
         await updateLeaderboard(address, 0.005); // 0.005 AVAX points for minting NFT
         
         pushTx(tx.hash, 'Mint NFT', '1 NFT (0.0005 AVAX)');
         await refreshBlockchainState();
-        setModalContent(`✅ NFT Minted!\nTX: ${tx.hash}\n🔗 https://testnet.snowtrace.io/tx/${tx.hash}`);
-        setShowModal(true);
-        setTimeout(() => setShowModal(false), 5000);
       } else {
         setModalContent('NFT minting transaction failed! Please try again.');
         setShowModal(true);

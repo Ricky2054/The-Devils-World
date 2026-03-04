@@ -15,7 +15,7 @@ export interface AVAXStaking$Type {
   readonly deployedLinkReferences: {};
   readonly immutableReferences: {};
   readonly inputSourceName: "project/contracts/AVAXStaking.sol";
-  readonly buildInfoId: "solc-0_8_23-fc480622ca93bcdf9c55ed6f28f9292c9947f182";
+  readonly buildInfoId: "solc-0_8_23-fe56b2276560a66b3da906b2fb60ac114994211f";
 };
 
 import "hardhat/types/artifacts";

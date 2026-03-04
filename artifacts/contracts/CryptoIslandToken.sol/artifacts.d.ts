@@ -15,7 +15,7 @@ export interface CryptoIslandToken$Type {
   readonly deployedLinkReferences: {};
   readonly immutableReferences: {};
   readonly inputSourceName: "project/contracts/CryptoIslandToken.sol";
-  readonly buildInfoId: "solc-0_8_23-9ac0f8ccb508896529b41d554172ecc0354adb4c";
+  readonly buildInfoId: "solc-0_8_23-fe56b2276560a66b3da906b2fb60ac114994211f";
 };
 
 import "hardhat/types/artifacts";

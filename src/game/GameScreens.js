@@ -705,6 +705,11 @@ export class GameScreenManager {
     ctx.fillText('🏆  LEADERBOARD  🏆', W / 2, 62);
     ctx.shadowBlur = 0;
 
+    // Subtitle: on-chain indicator
+    ctx.fillStyle = '#66ffaa';
+    ctx.font = `bold ${Math.min(12, W * 0.015)}px "Courier New", monospace`;
+    ctx.fillText('⛓️  Avalanche Fuji Testnet (On-Chain)  ⛓️', W / 2, 82);
+
     // Column layout
     const pad  = W * 0.04;
     const cols = {
@@ -743,9 +748,12 @@ export class GameScreenManager {
     const topN = scores.slice(0, 10);
     if (topN.length === 0) {
       ctx.textAlign = 'center';
+      ctx.fillStyle = '#999';
+      ctx.font = `bold 16px "Courier New", monospace`;
+      ctx.fillText('Loading from Avalanche Fuji blockchain...', W / 2, H / 2 - 15);
       ctx.fillStyle = '#666';
-      ctx.font = `bold 18px "Courier New", monospace`;
-      ctx.fillText('No scores yet — be the first!', W / 2, H / 2);
+      ctx.font = `14px "Courier New", monospace`;
+      ctx.fillText('Mint an Achievement NFT to appear here!', W / 2, H / 2 + 15);
     } else {
       topN.forEach((s, i) => {
         const y = headerY + rowH + i * rowH;
