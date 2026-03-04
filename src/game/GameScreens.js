@@ -908,10 +908,14 @@ export class GameScreenManager {
   }
 
   // Save score to localStorage — keeps only best score per wallet address
+  // Only wallet-connected players are saved; Anonymous entries are excluded
   saveScore(playerName, score, level, timePlayed, gameStats) {
-    const wallet = (playerName && playerName !== 'Anonymous')
-      ? playerName
-      : 'Anonymous';
+    // Do not save if no wallet connected
+    if (!playerName || playerName === 'Anonymous') {
+      return this.loadScores();
+    }
+
+    const wallet = playerName;
     const shortWallet = wallet.length > 12
       ? wallet.slice(0, 6) + '...' + wallet.slice(-4)
       : wallet;
@@ -927,26 +931,16 @@ export class GameScreenManager {
       gold:  gameStats.goldCollected  || 0,
     };
 
-    // Load & wipe any old-format entries (no fullAddress = legacy junk data)
+    // Load & wipe any old-format or anonymous entries
     let scores = JSON.parse(localStorage.getItem('fantasyKnightScores') || '[]');
-    scores = scores.filter(s => s.fullAddress && s.fullAddress !== undefined);
+    scores = scores.filter(s => s.fullAddress && s.fullAddress !== undefined && s.fullAddress !== 'Anonymous');
 
-    if (wallet === 'Anonymous') {
-      // Anonymous: keep only the single best anonymous run
-      const anonIdx = scores.findIndex(s => s.fullAddress === 'Anonymous');
-      if (anonIdx !== -1) {
-        if (score > scores[anonIdx].score) scores[anonIdx] = scoreEntry;
-      } else {
-        scores.push(scoreEntry);
-      }
+    // Wallet user: one best-score entry per wallet
+    const existingIdx = scores.findIndex(s => s.fullAddress === wallet);
+    if (existingIdx !== -1) {
+      if (score > scores[existingIdx].score) scores[existingIdx] = scoreEntry;
     } else {
-      // Wallet user: one best-score entry per wallet
-      const existingIdx = scores.findIndex(s => s.fullAddress === wallet);
-      if (existingIdx !== -1) {
-        if (score > scores[existingIdx].score) scores[existingIdx] = scoreEntry;
-      } else {
-        scores.push(scoreEntry);
-      }
+      scores.push(scoreEntry);
     }
 
     scores.sort((a, b) => b.score - a.score);
@@ -955,10 +949,10 @@ export class GameScreenManager {
     return scores;
   }
 
-  // Load scores from localStorage (strips legacy entries without fullAddress)
+  // Load scores from localStorage (strips legacy and anonymous entries)
   loadScores() {
     const raw = JSON.parse(localStorage.getItem('fantasyKnightScores') || '[]');
-    const cleaned = raw.filter(s => s.fullAddress && s.fullAddress !== undefined);
+    const cleaned = raw.filter(s => s.fullAddress && s.fullAddress !== undefined && s.fullAddress !== 'Anonymous');
     if (cleaned.length !== raw.length) {
       localStorage.setItem('fantasyKnightScores', JSON.stringify(cleaned));
     }
