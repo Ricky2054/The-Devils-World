@@ -681,7 +681,7 @@ export class GameScreenManager {
   }
 
   // Draw retro-style scoreboard
-  drawScoreboard(ctx, canvas, scores) {
+  drawScoreboard(ctx, canvas, scores, isFetched = false) {
     const W = canvas.width;
     const H = canvas.height;
 
@@ -748,12 +748,27 @@ export class GameScreenManager {
     const topN = scores.slice(0, 10);
     if (topN.length === 0) {
       ctx.textAlign = 'center';
-      ctx.fillStyle = '#999';
-      ctx.font = `bold 16px "Courier New", monospace`;
-      ctx.fillText('Loading from Avalanche Fuji blockchain...', W / 2, H / 2 - 15);
-      ctx.fillStyle = '#666';
-      ctx.font = `14px "Courier New", monospace`;
-      ctx.fillText('Mint an Achievement NFT to appear here!', W / 2, H / 2 + 15);
+      if (!isFetched) {
+        // Still loading
+        const dots = '.'.repeat(1 + Math.floor(Date.now() / 400) % 3);
+        ctx.fillStyle = '#66ffaa';
+        ctx.font = `bold 16px "Courier New", monospace`;
+        ctx.fillText(`Loading from Avalanche Fuji blockchain${dots}`, W / 2, H / 2 - 15);
+        ctx.fillStyle = '#888';
+        ctx.font = `13px "Courier New", monospace`;
+        ctx.fillText('Fetching on-chain scores...', W / 2, H / 2 + 15);
+      } else {
+        // Loaded but no scores yet
+        ctx.fillStyle = '#ffdd44';
+        ctx.font = `bold 18px "Courier New", monospace`;
+        ctx.fillText('No scores yet!', W / 2, H / 2 - 25);
+        ctx.fillStyle = '#aaa';
+        ctx.font = `14px "Courier New", monospace`;
+        ctx.fillText('Play the game and Mint an Achievement NFT', W / 2, H / 2 + 10);
+        ctx.fillStyle = '#66ffaa';
+        ctx.font = `13px "Courier New", monospace`;
+        ctx.fillText('to appear on the on-chain leaderboard!', W / 2, H / 2 + 35);
+      }
     } else {
       topN.forEach((s, i) => {
         const y = headerY + rowH + i * rowH;

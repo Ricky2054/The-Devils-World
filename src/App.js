@@ -381,11 +381,26 @@ function App() {
       case 'showScoreboard':
         setScreenState('scoreboard');
         screenManager.current.currentScreen = 'scoreboard';
-        // Fetch on-chain leaderboard scores (async — updates ref for RAF render)
-        blockchainScoresRef.current = []; // clear stale
-        blockchainScoresFetchedRef.current = false;
+        // Immediately seed with localStorage scores so something shows right away
+        {
+          const localScores = screenManager.current.loadScores();
+          blockchainScoresRef.current = localScores;
+          blockchainScoresFetchedRef.current = localScores.length > 0; // show loading only if truly empty
+        }
+        // Fetch on-chain leaderboard scores (async — merges with/overrides localStorage)
         contractService.getAllScores().then(scores => {
-          blockchainScoresRef.current = scores;
+          if (scores && scores.length > 0) {
+            // Merge: blockchain scores take priority, fill gaps with localStorage
+            const localScores = screenManager.current.loadScores();
+            const merged = [...scores];
+            localScores.forEach(ls => {
+              if (!merged.find(s => s.fullAddress && ls.fullAddress && s.fullAddress.toLowerCase() === ls.fullAddress.toLowerCase())) {
+                merged.push(ls);
+              }
+            });
+            merged.sort((a, b) => b.score - a.score);
+            blockchainScoresRef.current = merged.slice(0, 50);
+          }
           blockchainScoresFetchedRef.current = true;
         }).catch(err => {
           console.error('Failed to fetch blockchain scores:', err);
@@ -2461,7 +2476,8 @@ function App() {
       } else if (gameStateRef.current === 'scoreboard') {
         // Use cached blockchain scores (fetched async outside RAF)
         const scores = blockchainScoresRef.current;
-        screenManager.current.drawScoreboard(ctx, canvas, scores);
+        const isFetched = blockchainScoresFetchedRef.current;
+        screenManager.current.drawScoreboard(ctx, canvas, scores, isFetched);
         return;
       } else if (gameStateRef.current === 'help') {
         screenManager.current.drawHelpScreen(ctx, canvas);
