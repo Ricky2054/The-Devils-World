@@ -545,6 +545,7 @@ function App() {
     // Use refs for accurate data (gameStats is stale inside RAF closure)
     const totalKills = pendingRewardRef.current.kills || 0;
     const totalGold = pendingRewardRef.current.gold || 0;
+    const finalScore = (totalKills * 100) + (totalGold * 10) + (level * 500);
     const finalStats = {
       timePlayed: gameStartTime ? (Date.now() - gameStartTime) / 1000 : 0,
       experience: ps?.points.experience || 0,
@@ -555,7 +556,7 @@ function App() {
       enemiesKilled: totalKills,
       buildingsBuilt: 0,
       achievementsUnlocked: 0,
-      totalScore: (totalKills * 100) + (totalGold * 10) + (level * 500),
+      totalScore: finalScore,
     };
     
     deathTimerRef.current = 0; // reset for next game
@@ -567,6 +568,14 @@ function App() {
     
     // Play game over music
     musicManager.current.playTrack('gameOver', false);
+
+    // === Auto-submit score to on-chain leaderboard if wallet is connected ===
+    // This runs silently in the background — no popup, no waiting
+    if (walletAddressRef.current && walletAddressRef.current !== 'Anonymous' && finalScore > 0) {
+      contractService.submitScore(finalScore, totalKills, totalGold, level)
+        .then(() => console.log('Score auto-submitted to leaderboard:', finalScore))
+        .catch(err => console.warn('Auto-submit score failed (non-critical):', err));
+    }
   };
 
   // Handle canvas click for building placement

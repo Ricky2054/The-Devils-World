@@ -511,33 +511,42 @@ class ContractService {
    * Returns array sorted by score descending
    */
   async getAllScores() {
-    try {
-      // Use a read-only provider so anyone can read even without connecting wallet
-      const readProvider = new ethers.JsonRpcProvider(FUJI_NETWORK_CONFIG.rpcUrl);
-      const readContract = new ethers.Contract(
-        FUJI_CONTRACT_ADDRESSES.LEADERBOARD,
-        LEADERBOARD_ABI,
-        readProvider
-      );
-      const rawScores = await readContract.getAllScores();
-      const scores = rawScores.map(s => ({
-        player: s.player,
-        playerName: s.player.slice(0, 6) + '...' + s.player.slice(-4),
-        fullAddress: s.player,
-        score: Number(s.score),
-        kills: Number(s.kills),
-        gold: Number(s.gold),
-        level: Number(s.level),
-        timestamp: Number(s.timestamp),
-        date: new Date(Number(s.timestamp) * 1000).toLocaleDateString(),
-      }));
-      // Sort by score descending
-      scores.sort((a, b) => b.score - a.score);
-      return scores.slice(0, 50);
-    } catch (error) {
-      console.error('Get all scores error:', error);
-      return [];
+    // Try multiple RPC endpoints in case one is down
+    const rpcUrls = [
+      FUJI_NETWORK_CONFIG.rpcUrl,
+      'https://rpc.ankr.com/avalanche_fuji',
+      'https://avalanche-fuji-c-chain-rpc.publicnode.com',
+      'https://endpoints.omniatech.io/v1/avax/fuji/public',
+    ];
+    for (const rpcUrl of rpcUrls) {
+      try {
+        const readProvider = new ethers.JsonRpcProvider(rpcUrl);
+        const readContract = new ethers.Contract(
+          FUJI_CONTRACT_ADDRESSES.LEADERBOARD,
+          LEADERBOARD_ABI,
+          readProvider
+        );
+        const rawScores = await readContract.getAllScores();
+        const scores = rawScores.map(s => ({
+          player: s.player,
+          playerName: s.player.slice(0, 6) + '...' + s.player.slice(-4),
+          fullAddress: s.player,
+          score: Number(s.score),
+          kills: Number(s.kills),
+          gold: Number(s.gold),
+          level: Number(s.level),
+          timestamp: Number(s.timestamp),
+          date: new Date(Number(s.timestamp) * 1000).toLocaleDateString(),
+        }));
+        // Sort by score descending
+        scores.sort((a, b) => b.score - a.score);
+        return scores.slice(0, 50);
+      } catch (error) {
+        console.warn(`getAllScores failed on ${rpcUrl}:`, error.message);
+      }
     }
+    console.error('getAllScores: all RPC endpoints failed');
+    return [];
   }
 
   /**
