@@ -69,6 +69,41 @@ function App() {
   const [hud, setHud] = useState({ hunger: 0, life: 1, xp: 0, karma: 0 });
   const [hazards, setHazards] = useState([]); // {type:'lightning',x,y,ttl}
 
+  // ── Daily Streak System ──
+  const STREAK_KEY = 'dw_daily_streak_v1';
+  const getStreakData = () => {
+    try {
+      const raw = localStorage.getItem(STREAK_KEY);
+      if (!raw) return { lastLogin: null, streak: 0 };
+      return JSON.parse(raw);
+    } catch { return { lastLogin: null, streak: 0 }; }
+  };
+  const computeStreak = () => {
+    const data = getStreakData();
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    if (data.lastLogin === today) return data; // already logged in today
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    let newStreak = data.lastLogin === yesterday ? data.streak + 1 : 1;
+    const updated = { lastLogin: today, streak: newStreak };
+    localStorage.setItem(STREAK_KEY, JSON.stringify(updated));
+    return updated;
+  };
+  const getStreakMultiplier = (streak) => {
+    if (streak >= 30) return 5.0;
+    if (streak >= 7) return 2.0;
+    // linear ramp: day 1 → 1.1x, day 6 → ~1.9x
+    return 1.0 + streak * 0.15;
+  };
+  const streakRef = useRef(computeStreak());
+  const [streakUI, setStreakUI] = useState(streakRef.current);
+
+  // ── Boss System ──
+  const bossRef = useRef({ active: false, spawnedForLevel: 0 });
+  const [bossAlert, setBossAlert] = useState(null); // {text, ttl}
+
+  // ── Gold Drops (enemy loot on ground with decay) ──
+  const goldDropsRef = useRef([]); // [{x, y, value, spawnTime, lifetime}]
+
   // Force refresh UI to ensure updates are visible
   const forceRefreshUI = () => {
     // Force a re-render by updating a dummy state
@@ -361,6 +396,23 @@ function App() {
     musicManager.current.resume();
     screenManager.current.currentScreen = 'playing';
     musicManager.current.playTrack(isNight ? 'gameplay_night' : 'gameplay_day');
+
+    // Daily Streak login check — show streak toast
+    const sd = computeStreak();
+    streakRef.current = sd;
+    setStreakUI(sd);
+    const sMult = getStreakMultiplier(sd.streak);
+    if (sd.streak > 1) {
+      setModalContent(`🔥 Day ${sd.streak} streak! Gold multiplier: x${sMult.toFixed(1)}`);
+    } else {
+      setModalContent(`⚡ Welcome back! Start a streak by playing daily for bonus gold!`);
+    }
+    setShowModal(true);
+    setTimeout(() => setShowModal(false), 3500);
+
+    // Reset boss state for new game
+    bossRef.current = { active: false, spawnedForLevel: 0 };
+    goldDropsRef.current = [];
   };
 
   const toggleMusicPlayback = () => {
@@ -2160,15 +2212,79 @@ function App() {
     
     // Remove dead enemies and track kills
     const beforeCount = gameWorldState.current.enemies.length;
+    const deadEnemies = gameWorldState.current.enemies.filter(e => e.health <= 0);
     gameWorldState.current.enemies = gameWorldState.current.enemies.filter(e => e.health > 0);
     const killed = beforeCount - gameWorldState.current.enemies.length;
     if (killed > 0) {
       pendingRewardRef.current.kills += killed;
+      // === XP gain from kills (needed for level-up & boss spawns) ===
+      if (pointSystem.current) {
+        let xpGained = 0;
+        deadEnemies.forEach(e => {
+          const baseXP = e.isBoss ? 500 : (e.difficulty === 'hard' ? 150 : e.difficulty === 'medium' ? 100 : 50);
+          xpGained += baseXP;
+        });
+        pointSystem.current.points.experience += xpGained;
+        pointSystem.current.points.stats.enemiesDefeated += killed;
+        pointSystem.current.save();
+        setGamePoints({ ...pointSystem.current.points });
+      }
       setGameStats(prev => {
         const newKills = prev.enemiesKilled + killed;
         checkGameMilestones(newKills, prev.goldCollected, 0);
         return { ...prev, enemiesKilled: newKills };
       });
+      // === Gold Drops from killed enemies ===
+      const drops = goldDropsRef.current;
+      deadEnemies.forEach(e => {
+        const dropValue = e.isBoss
+          ? (e.difficulty === 'hard' ? 50 : e.difficulty === 'medium' ? 30 : 20)
+          : (e.difficulty === 'hard' ? 5 : e.difficulty === 'medium' ? 3 : 1);
+        drops.push({
+          x: e.x + (e.width || 16) / 2,
+          y: e.y,
+          value: dropValue,
+          spawnTime: Date.now(),
+          lifetime: 8000, // 8 seconds decay
+        });
+        // Boss kill: extra reward + NFT drop chance
+        if (e.isBoss) {
+          bossRef.current.active = false;
+          setBossAlert({ text: `BOSS DEFEATED! +${dropValue} Gold dropped!`, ttl: 180 });
+          // 30% chance for NFT mint prompt
+          if (Math.random() < 0.3) {
+            setTimeout(() => {
+              setModalContent('🏆 RARE DROP! The boss dropped an NFT shard!\nPress the ⛓ Web3 panel to mint!');
+              setShowModal(true);
+              setTimeout(() => setShowModal(false), 5000);
+            }, 2000);
+          }
+        }
+      });
+    }
+
+    // === Boss Spawn Check ===
+    const currentLvl = pointSystem.current?.getLevel?.() || 1;
+    if (currentLvl >= 5 && currentLvl % 5 === 0 && !bossRef.current.active && bossRef.current.spawnedForLevel !== currentLvl) {
+      // Spawn boss near player
+      const bossX = player.x + (Math.random() < 0.5 ? -1 : 1) * (200 + Math.random() * 100);
+      const bossY = player.y + (Math.random() < 0.5 ? -1 : 1) * (150 + Math.random() * 100);
+      const bossHP = 300 + currentLvl * 50;
+      const bossSpeed = 1.8 + currentLvl * 0.05;
+      const bossDiff = currentLvl >= 20 ? 'hard' : currentLvl >= 10 ? 'medium' : 'easy';
+      const boss = normalizeEnemy({
+        x: bossX, y: bossY, width: 24, height: 24, type: 'bee',
+        difficulty: bossDiff, health: bossHP, maxHealth: bossHP, speed: bossSpeed
+      });
+      boss.isBoss = true;
+      boss.renderWidth = 48;
+      boss.renderHeight = 48;
+      boss.yOffset = 20;
+      gameWorldState.current.enemies.push(boss);
+      bossRef.current.active = true;
+      bossRef.current.spawnedForLevel = currentLvl;
+      setBossAlert({ text: `⚠️ BOSS APPEARED! Level ${currentLvl} Guardian!`, ttl: 240 });
+      musicManager.current.playTrack('combat');
     }
   };
 
@@ -2176,17 +2292,21 @@ function App() {
   const updateTreasures = () => {
     const player = gameWorldState.current.player;
     const currentArea = gameMap.areas[gameMap.currentArea];
+    const streakMult = getStreakMultiplier(streakRef.current.streak);
     
     (currentArea.treasures || []).forEach(treasure => {
       if (!treasure.collected && checkCollision(player, { x: treasure.x, y: treasure.y, width: 20, height: 20 })) {
         treasure.collected = true;
         playSound('collect', 600, 0.2);
         
+        // Apply streak multiplier to gold
+        const boostedValue = Math.round(treasure.value * streakMult);
+        
         // Track gold for blockchain exchange
-        pendingRewardRef.current.gold += treasure.value;
+        pendingRewardRef.current.gold += boostedValue;
         pendingRewardRef.current.treasures += 1;
         setGameStats(prev => {
-          const newGold = prev.goldCollected + treasure.value;
+          const newGold = prev.goldCollected + boostedValue;
           checkGameMilestones(prev.enemiesKilled, newGold, 0);
           return { ...prev, goldCollected: newGold };
         });
@@ -2194,8 +2314,8 @@ function App() {
         // Update player stats - only AVAX
         setPlayerStats(prev => ({
           ...prev,
-          points: prev.points + treasure.value, // Add AVAX points
-          avax: prev.avax + treasure.value // Add to AVAX balance
+          points: prev.points + boostedValue,
+          avax: prev.avax + boostedValue
         }));
 
         // Chance to drop apple (food)
@@ -2206,14 +2326,33 @@ function App() {
         // Immediately update real-time stats to reflect changes
         setTimeout(() => {
           updateRealtimeStatsImmediately();
-        }, 100); // Small delay to ensure state is updated
+        }, 100);
         
-        // Show collection message
-        setModalContent(`Found ${treasure.name}! +${treasure.value} AVAX Points`);
+        // Show collection message (with streak info if applicable)
+        const streakStr = streakMult > 1.05 ? ` (x${streakMult.toFixed(1)} streak!)` : '';
+        setModalContent(`Found ${treasure.name}! +${boostedValue} Gold${streakStr}`);
         setShowModal(true);
         setTimeout(() => setShowModal(false), 3000);
       }
     });
+
+    // === Gold Drops (enemy loot) — collect on touch, decay after 8s ===
+    const drops = goldDropsRef.current;
+    const now = Date.now();
+    for (let i = drops.length - 1; i >= 0; i--) {
+      const d = drops[i];
+      // Expire after lifetime
+      if (now - d.spawnTime > d.lifetime) { drops.splice(i, 1); continue; }
+      // Check player collision
+      if (checkCollision(player, { x: d.x - 6, y: d.y - 6, width: 16, height: 16 })) {
+        const boosted = Math.round(d.value * streakMult);
+        pendingRewardRef.current.gold += boosted;
+        setGameStats(prev => ({ ...prev, goldCollected: prev.goldCollected + boosted }));
+        setPlayerStats(prev => ({ ...prev, points: prev.points + boosted, avax: prev.avax + boosted }));
+        playSound('collect', 700, 0.25);
+        drops.splice(i, 1);
+      }
+    }
   };
 
   // Atmospheric drawing functions
@@ -2758,6 +2897,48 @@ function App() {
       }
     });
     
+    // === Draw Gold Drops (enemy loot on ground with decay) ===
+    const gDrops = goldDropsRef.current;
+    const gDropNow = Date.now();
+    gDrops.forEach(d => {
+      const elapsed = gDropNow - d.spawnTime;
+      const remaining = Math.max(0, 1 - elapsed / d.lifetime);
+      // Flash faster as decay approaches
+      const flash = remaining < 0.3 ? (Math.sin(elapsed * 0.02) > 0 ? 1 : 0.2) : 1;
+      const cx = d.x;
+      const cy = d.y + Math.sin(elapsed * 0.005) * 2; // gentle bob
+      const r = 5;
+
+      ctx.save();
+      ctx.globalAlpha = remaining * flash;
+      // Gold glow
+      ctx.beginPath();
+      ctx.arc(cx, cy, r + 4, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255, 215, 0, ${0.3 * remaining})`;
+      ctx.fill();
+      // Coin body
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffd700';
+      ctx.fill();
+      ctx.strokeStyle = '#b8860b';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      // Value label
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 7px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`+${d.value}`, cx, cy - r - 3);
+      ctx.textAlign = 'start';
+      // Decay timer bar
+      const barW = 16;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(cx - barW / 2, cy + r + 2, barW, 2);
+      ctx.fillStyle = remaining > 0.3 ? '#00ff66' : '#ff4444';
+      ctx.fillRect(cx - barW / 2, cy + r + 2, barW * remaining, 2);
+      ctx.restore();
+    });
+
     // Draw enemies by type and state
     gameWorldState.current.enemies.forEach(enemy => {
       let enemyImg = null;
@@ -2770,6 +2951,22 @@ function App() {
       const drawH = enemy.renderHeight || 22;
       const drawX = enemy.x - Math.floor((drawW - enemy.width) / 2);
       const drawY = enemy.y - (enemy.yOffset || 8);
+
+      // BOSS: red aura + pulsing glow
+      if (enemy.isBoss) {
+        const t = Date.now();
+        const pulse = 0.3 + 0.2 * Math.sin(t * 0.004);
+        ctx.fillStyle = `rgba(255, 0, 0, ${pulse})`;
+        ctx.beginPath();
+        ctx.arc(enemy.x + enemy.width / 2, enemy.y + enemy.height / 2, drawW * 0.8, 0, Math.PI * 2);
+        ctx.fill();
+        // Skull icon above boss
+        ctx.fillStyle = '#ff3333';
+        ctx.font = 'bold 14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('\u2620', enemy.x + enemy.width / 2, drawY - 14);
+        ctx.textAlign = 'start';
+      }
 
       // Hit flash — aligned to sprite rect
       if (enemy.state === 'hit') {
@@ -3271,6 +3468,85 @@ function App() {
     ctx.font = '11px "Segoe UI", Arial, sans-serif';
     ctx.textAlign = 'start';
     ctx.fillText('WASD Move  |  J Attack  |  K Defend  |  L Roll  |  E Talk  |  F Eat  |  I Inventory  |  B Build', 14, barH - 7);
+
+    // ── Streak Badge (top-left, below HUD bar) ──
+    const streak = streakRef.current.streak;
+    if (streak >= 1) {
+      const sBadgeX = 14;
+      const sBadgeY = barH + 6;
+      const sMult = getStreakMultiplier(streak);
+      const sColor = streak >= 30 ? '#ff6600' : streak >= 7 ? '#ffd700' : '#88cc44';
+      const sIcon = streak >= 30 ? '🔥' : streak >= 7 ? '⭐' : '⚡';
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(sBadgeX, sBadgeY, 160, 20);
+      ctx.strokeStyle = sColor;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(sBadgeX, sBadgeY, 160, 20);
+      ctx.fillStyle = sColor;
+      ctx.font = 'bold 11px "Segoe UI", sans-serif';
+      ctx.textAlign = 'start';
+      ctx.fillText(`${sIcon} Streak: Day ${streak}  (x${sMult.toFixed(1)} Gold)`, sBadgeX + 6, sBadgeY + 14);
+    }
+
+    // ── Boss HP Bar (top-center, large) ──
+    const bossEnemy = gameWorldState.current.enemies.find(e => e.isBoss);
+    if (bossEnemy) {
+      const bossBarW = Math.min(300, W * 0.35);
+      const bossBarH = 14;
+      const bossBarX = (W - bossBarW) / 2;
+      const bossBarY = barH + 8;
+      const bossHpPct = bossEnemy.health / bossEnemy.maxHealth;
+
+      // Background
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      ctx.fillRect(bossBarX - 2, bossBarY - 2, bossBarW + 4, bossBarH + 16);
+      // Label
+      ctx.fillStyle = '#ff3333';
+      ctx.font = 'bold 10px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`☠ BOSS  Lv${pointSystem.current?.getLevel?.() || '?'}`, W / 2, bossBarY + 10);
+      // Bar track
+      ctx.fillStyle = 'rgba(80, 0, 0, 0.8)';
+      ctx.fillRect(bossBarX, bossBarY + 12, bossBarW, bossBarH);
+      // Bar fill
+      const bossBarGrad = ctx.createLinearGradient(bossBarX, 0, bossBarX + bossBarW, 0);
+      bossBarGrad.addColorStop(0, '#ff0000');
+      bossBarGrad.addColorStop(1, '#ff6600');
+      ctx.fillStyle = bossBarGrad;
+      ctx.fillRect(bossBarX, bossBarY + 12, bossBarW * bossHpPct, bossBarH);
+      // HP text
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 10px monospace';
+      ctx.fillText(`${bossEnemy.health} / ${bossEnemy.maxHealth}`, W / 2, bossBarY + 23);
+      ctx.textAlign = 'start';
+      // Border
+      ctx.strokeStyle = '#ff4444';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(bossBarX, bossBarY + 12, bossBarW, bossBarH);
+    }
+
+    // ── Boss Alert Banner ──
+    if (bossAlert && bossAlert.ttl > 0) {
+      const alertAlpha = Math.min(1, bossAlert.ttl / 30);
+      ctx.save();
+      ctx.globalAlpha = alertAlpha;
+      ctx.fillStyle = 'rgba(180, 0, 0, 0.85)';
+      const alertW = Math.min(400, W * 0.5);
+      const alertH = 36;
+      const alertX = (W - alertW) / 2;
+      const alertY = H * 0.3;
+      ctx.fillRect(alertX, alertY, alertW, alertH);
+      ctx.strokeStyle = '#ff6600';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(alertX, alertY, alertW, alertH);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 16px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(bossAlert.text, W / 2, alertY + 24);
+      ctx.textAlign = 'start';
+      ctx.restore();
+      setBossAlert(prev => prev ? { ...prev, ttl: prev.ttl - 1 } : null);
+    }
 
     // ── Top-right circular navigator minimap (cached) ──
     const mw = motherWorldRef.current;
