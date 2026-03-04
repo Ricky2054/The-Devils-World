@@ -495,10 +495,23 @@ class ContractService {
    */
   async submitScore(score, kills, gold, level) {
     try {
+      // Self-heal: if leaderboardContract wasn't initialized, try now
+      if (!this.leaderboardContract) {
+        console.warn('submitScore: leaderboardContract not initialized, attempting init...');
+        if (window.ethereum) {
+          await this.initialize(window.ethereum);
+        }
+        if (!this.leaderboardContract) {
+          throw new Error('Leaderboard contract not available - wallet may not be connected');
+        }
+      }
+      console.log('submitScore: sending tx with', { score, kills, gold, level });
       const tx = await this.leaderboardContract.submitScore(
         Math.floor(score), Math.floor(kills), Math.floor(gold), Math.floor(level)
       );
-      await tx.wait();
+      console.log('submitScore: tx sent, hash:', tx.hash);
+      const receipt = await tx.wait();
+      console.log('submitScore: tx confirmed, status:', receipt.status);
       return tx;
     } catch (error) {
       console.error('Submit score error:', error);

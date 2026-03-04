@@ -290,6 +290,7 @@ function App() {
       setIsConnected(true);
       setWeb3Quest(prev => ({ ...prev, wallet: true }));
       setWalletAddress(result.address);
+      walletAddressRef.current = result.address; // keep ref in sync for RAF
 
       let initialized = false;
       try {
@@ -572,9 +573,17 @@ function App() {
     // === Auto-submit score to on-chain leaderboard if wallet is connected ===
     // This runs silently in the background — no popup, no waiting
     if (walletAddressRef.current && walletAddressRef.current !== 'Anonymous' && finalScore > 0) {
+      console.log('Auto-submitting score to blockchain:', { finalScore, totalKills, totalGold, level, wallet: walletAddressRef.current });
       contractService.submitScore(finalScore, totalKills, totalGold, level)
-        .then(() => console.log('Score auto-submitted to leaderboard:', finalScore))
-        .catch(err => console.warn('Auto-submit score failed (non-critical):', err));
+        .then(() => {
+          console.log('Score auto-submitted to leaderboard:', finalScore);
+          // Also save to localStorage so it shows immediately next time
+          screenManager.current.saveScore(
+            walletAddressRef.current, finalScore, level, 
+            finalStats.timePlayed, finalStats
+          );
+        })
+        .catch(err => console.warn('Auto-submit score failed (non-critical):', err.message || err));
     }
   };
 
